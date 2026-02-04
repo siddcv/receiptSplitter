@@ -1,0 +1,61 @@
+# --- General OS/editor noise ---
+.DS_Store
+Thumbs.db
+
+# --- IDE/editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Python build/cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Python packaging/build ---
+build/
+dist/
+.eggs/
+*.egg
+*.egg-info/
+*.spec
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+# Project-local venv folder
+receiptSplit/
+
+# --- Test/coverage caches ---
+.pytest_cache/
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Logs & local config ---
+*.log
+*.tmp
+*.local
+
+# --- Environment files ---
+.env
+.env.*
+*.env
+
+# --- Node / frontend ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- App-specific temp dirs ---
+agentic-receipt-splitter/uploads/
+agentic-receipt-splitter/tmp/
