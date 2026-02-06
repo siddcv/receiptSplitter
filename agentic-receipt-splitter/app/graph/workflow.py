@@ -8,6 +8,7 @@ with the PostgresSaver checkpointer so we can save and retrieve by thread_id.
 from __future__ import annotations
 
 import operator
+import os
 from typing import Any, Dict
 
 from langgraph.graph import END, START, StateGraph
@@ -22,15 +23,25 @@ def _noop_node(state: ReceiptState) -> ReceiptState:
 
 
 def build_graph() -> Any:
-	"""Build and compile the trivial graph with audit log reducer and checkpointer."""
+	"""Build and compile the trivial graph.
+
+	Honors env toggle USE_IN_MEMORY:
+	- If set to '1'/'true', compiles WITHOUT a checkpointer (no DB required).
+	- Otherwise, compiles with Postgres checkpointer for persistence.
+	"""
 	reducers = {"audit_log": operator.add}
 	graph = StateGraph(ReceiptState, reducers=reducers)
 	graph.add_node("noop", _noop_node)
 	graph.add_edge(START, "noop")
 	graph.add_edge("noop", END)
 
-	checkpointer = get_checkpointer()
-	app_graph = graph.compile(checkpointer=checkpointer)
+	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+	if use_in_memory:
+		# Compile without a checkpointer; state persists only in-process
+		app_graph = graph.compile()
+	else:
+		checkpointer = get_checkpointer()
+		app_graph = graph.compile(checkpointer=checkpointer)
 	return app_graph
 
 
