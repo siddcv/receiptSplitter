@@ -33,6 +33,7 @@ app = FastAPI(title="Agentic Receipt Splitter", version="0.1")
 
 # Compiled graph singleton
 _APP_GRAPH = None
+_INMEM_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 def _uploads_dir() -> Path:
@@ -122,12 +123,27 @@ async def upload_receipt(file: UploadFile = File(...)) -> Dict[str, Any]:
 			return obj.dict()
 		except Exception:
 			return {}
+	state_dict = _to_dict(result)
 
-	return {"thread_id": thread_id, "state": _to_dict(result)}
+	# In in-memory mode, store the latest state so GET /state can retrieve it
+	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+	if use_in_memory:
+		_INMEM_STORE[thread_id] = state_dict
+
+	return {"thread_id": thread_id, "state": state_dict}
 
 
 @app.get("/state/{thread_id}")
 def get_state(thread_id: str) -> Dict[str, Any]:
+	# If using in-memory mode, read from the local store
+	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+	if use_in_memory:
+		saved = _INMEM_STORE.get(thread_id)
+		if not saved:
+			raise HTTPException(status_code=404, detail="No state found for thread_id (in-memory mode).")
+		return saved
+
+	# Otherwise, use the checkpointer-backed retrieval
 	app_graph = _get_graph()
 	cfg = {"configurable": {"thread_id": thread_id}}
 	get_state_fn = getattr(app_graph, "get_state", None)
