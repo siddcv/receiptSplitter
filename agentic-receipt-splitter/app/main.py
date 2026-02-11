@@ -181,9 +181,13 @@ class AssignmentInput(BaseModel):
 
 class InterviewRequest(BaseModel):
 	"""Payload for POST /interview/{thread_id}."""
-	# Support both free-form text and structured assignments
-	free_form_assignment: Optional[str] = None  # New free-form input
-	participants: Optional[List[str]] = None    # Legacy structured input
+	# New step-by-step flow
+	participant_input: Optional[str] = None      # Step 1: Comma-separated participant names
+	assignment_input: Optional[str] = None       # Step 2: Assignment descriptions
+	
+	# Legacy support for existing formats  
+	free_form_assignment: Optional[str] = None   # Legacy free-form input
+	participants: Optional[List[str]] = None     # Legacy structured input
 	assignments: Optional[List[AssignmentInput]] = None  # Legacy structured input
 
 
@@ -228,8 +232,13 @@ async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, 
 	# Build a merged state dict for the interview node
 	merged_state = dict(existing)
 
-	# Handle free-form text input (preferred)
-	if body.free_form_assignment:
+	# Handle new step-by-step input (preferred)
+	if body.participant_input:
+		merged_state["participant_input"] = body.participant_input.strip()
+	elif body.assignment_input:
+		merged_state["assignment_input"] = body.assignment_input.strip()
+	# Handle legacy free-form text input
+	elif body.free_form_assignment:
 		merged_state["free_form_assignment"] = body.free_form_assignment.strip()
 	# Handle legacy structured input
 	elif body.participants and body.assignments:
@@ -249,7 +258,7 @@ async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, 
 	else:
 		raise HTTPException(
 			status_code=400,
-			detail="Please provide either 'free_form_assignment' text or structured 'participants' and 'assignments'."
+			detail="Please provide participant_input, assignment_input, or legacy format input."
 		)
 
 	# Run interview phase 2 directly
@@ -343,7 +352,7 @@ async def create_mock_state(body: MockStateRequest) -> Dict[str, Any]:
 		"pending_questions": [
 			"Please provide the participants and assign each item.\n\n"
 			"Extracted items:\n"
-			+ "\n".join(f"  [{i}] {item['name']} — ${item['price']}" for i, item in enumerate(body.items))
+			+ "\n".join(f"  [{i}] {item['name']} — ${item.get('unit_price', item.get('price', '0.00'))}" for i, item in enumerate(body.items))
 			+ "\n\nFor each item, specify which participant(s) share it and their "
 			"fraction (fractions must sum to 1.00 per item)."
 		] if body.current_node == "interview_pending" else [],

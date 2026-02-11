@@ -244,7 +244,12 @@ def vision_node(state: ReceiptState) -> Dict[str, Any]:
     Returns a dict (not a full ReceiptState) so the graph reducer can merge
     fields additively (especially audit_log via operator.add).
     """
-    image_path = state.image_path
+    # Handle both ReceiptState objects and plain dicts
+    if hasattr(state, 'image_path'):  # ReceiptState object
+        image_path = state.image_path
+    else:  # Plain dict
+        image_path = state.get("image_path")
+        
     if not image_path:
         return {
             "current_node": "vision",
