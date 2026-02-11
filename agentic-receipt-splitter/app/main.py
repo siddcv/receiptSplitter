@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 """
-FastAPI backend skeleton for Agentic Receipt Splitter.
+FastAPI backend for the Agentic Receipt Splitter.
 
 Exposes:
-- GET /            : health/info
-- POST /upload     : upload a receipt image, create a thread_id, persist initial state
-- GET /state/{id}  : fetch latest persisted state snapshot for a thread
-
-The vision/math nodes will be added later; currently the graph includes a noop node
-and uses the Postgres checkpointer to persist state per thread_id.
+- GET /                   : health/info
+- POST /upload            : upload a receipt image → runs vision + interview phase 1
+- POST /interview/{id}    : submit participant assignments → runs interview phase 2
+- GET /state/{id}         : fetch latest state snapshot for a thread
+- POST /test/mock-state   : create mock state for testing (in-memory mode only)
 """
 
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from app.graph.state import AuditEvent, ReceiptState
 from app.graph.workflow import build_graph
@@ -160,4 +161,196 @@ def get_state(thread_id: str) -> Dict[str, Any]:
 		return saved.dict()
 	except Exception:
 		return {"thread_id": thread_id}
+
+
+# ---------------------------------------------------------------------------
+# Interview endpoint — Phase 2: accept participant assignments
+# ---------------------------------------------------------------------------
+
+class ShareInput(BaseModel):
+	"""A single participant's fractional share of an item."""
+	participant: str
+	fraction: float  # will be converted to Decimal in the node
+
+
+class AssignmentInput(BaseModel):
+	"""Assignment for one item by its index."""
+	item_index: int
+	shares: List[ShareInput]
+
+
+class InterviewRequest(BaseModel):
+	"""Payload for POST /interview/{thread_id}."""
+	# Support both free-form text and structured assignments
+	free_form_assignment: Optional[str] = None  # New free-form input
+	participants: Optional[List[str]] = None    # Legacy structured input
+	assignments: Optional[List[AssignmentInput]] = None  # Legacy structured input
+
+
+@app.post("/interview/{thread_id}")
+async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, Any]:
+	"""Accept participant assignments via free-form text or structured data.
+
+	This re-invokes the interview node with the user's input.
+	"""
+	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+
+	# Retrieve existing state
+	if use_in_memory:
+		existing = _INMEM_STORE.get(thread_id)
+		if not existing:
+			raise HTTPException(
+				status_code=404,
+				detail="No state found for thread_id (in-memory mode).",
+			)
+	else:
+		raise HTTPException(
+			status_code=501,
+			detail="Interview re-invocation with Postgres checkpointer not yet implemented.",
+		)
+
+	# Verify the graph is waiting for interview input
+	if isinstance(existing, dict):
+		current_node = existing.get("current_node", "")
+	else:
+		current_node = getattr(existing, "current_node", "")
+	
+	if current_node != "interview_pending":
+		raise HTTPException(
+			status_code=409,
+			detail=f"Thread is at node '{current_node}', not 'interview_pending'. "
+			"Cannot submit interview answers at this stage.",
+		)
+
+	# Build a state patch with the user's input and re-invoke the interview node
+	from app.graph.nodes.interview import interview_node
+
+	# Build a merged state dict for the interview node
+	merged_state = dict(existing)
+
+	# Handle free-form text input (preferred)
+	if body.free_form_assignment:
+		merged_state["free_form_assignment"] = body.free_form_assignment.strip()
+	# Handle legacy structured input
+	elif body.participants and body.assignments:
+		merged_state["participants"] = body.participants
+		# Convert the request to plain dicts the interview node expects
+		assignments_dicts = [
+			{
+				"item_index": a.item_index,
+				"shares": [
+					{"participant": s.participant, "fraction": str(s.fraction)}
+					for s in a.shares
+				],
+			}
+			for a in body.assignments
+		]
+		merged_state["assignments"] = assignments_dicts
+	else:
+		raise HTTPException(
+			status_code=400,
+			detail="Please provide either 'free_form_assignment' text or structured 'participants' and 'assignments'."
+		)
+
+	# Run interview phase 2 directly
+	result = interview_node(merged_state)
+
+	# Merge result back into state
+	for key, value in result.items():
+		if key == "audit_log":
+			# Append, don't replace
+			merged_state.setdefault("audit_log", [])
+			merged_state["audit_log"] = merged_state["audit_log"] + value
+		elif key == "pending_questions":
+			# Replace (phase 2 clears or sets new questions)
+			merged_state[key] = value
+		else:
+			merged_state[key] = value
+
+	# Serialize any Pydantic models for JSON storage
+	merged_state = _serialize_state(merged_state)
+
+	# Store updated state
+	if use_in_memory:
+		_INMEM_STORE[thread_id] = merged_state
+
+	return {"thread_id": thread_id, "state": merged_state}
+
+
+def _serialize_state(state: Dict[str, Any]) -> Dict[str, Any]:
+	"""Recursively convert Pydantic models and Decimals to JSON-safe dicts."""
+	import json
+	from decimal import Decimal
+	from datetime import datetime
+
+	def _default(obj: Any) -> Any:
+		if isinstance(obj, Decimal):
+			return str(obj)
+		if isinstance(obj, datetime):
+			return obj.isoformat() + "Z"  # ISO format with Z suffix
+		if hasattr(obj, "model_dump"):
+			return obj.model_dump()
+		if hasattr(obj, "dict"):
+			return obj.dict()
+		raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+	# Round-trip through JSON to normalize everything
+	raw = json.loads(json.dumps(state, default=_default))
+	return raw
+
+
+# ---------------------------------------------------------------------------
+# Test endpoint — inject mock state for testing interview flow
+# ---------------------------------------------------------------------------
+
+class MockStateRequest(BaseModel):
+	"""Request to create a mock state for testing."""
+	thread_id: str
+	items: List[Dict[str, Any]]
+	totals: Optional[Dict[str, Any]] = None
+	current_node: str = "interview_pending"
+
+
+@app.post("/test/mock-state")
+async def create_mock_state(body: MockStateRequest) -> Dict[str, Any]:
+	"""Create a mock state for testing the interview flow (in-memory mode only)."""
+	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+	if not use_in_memory:
+		raise HTTPException(
+			status_code=501,
+			detail="Mock state creation only available in in-memory mode."
+		)
+
+	from datetime import datetime
+
+	# Build mock state
+	mock_state = {
+		"thread_id": body.thread_id,
+		"image_path": f"test_{body.thread_id}.jpg",
+		"items": body.items,
+		"participants": [],
+		"assignments": [],
+		"totals": body.totals,
+		"current_node": body.current_node,
+		"audit_log": [
+			{
+				"timestamp": datetime.now().isoformat() + "Z",
+				"node": "test",
+				"message": f"Created mock state with {len(body.items)} items",
+				"details": {"mock": True, "item_count": len(body.items)},
+			}
+		],
+		"pending_questions": [
+			"Please provide the participants and assign each item.\n\n"
+			"Extracted items:\n"
+			+ "\n".join(f"  [{i}] {item['name']} — ${item['price']}" for i, item in enumerate(body.items))
+			+ "\n\nFor each item, specify which participant(s) share it and their "
+			"fraction (fractions must sum to 1.00 per item)."
+		] if body.current_node == "interview_pending" else [],
+	}
+
+	# Store in in-memory store
+	_INMEM_STORE[body.thread_id] = _serialize_state(mock_state)
+
+	return {"thread_id": body.thread_id, "state": _serialize_state(mock_state)}
 

@@ -1,9 +1,10 @@
 """
 LangGraph workflow wiring for the Agentic Receipt Splitter.
 
-Current graph: START → vision → END
-The vision node extracts items + totals from a receipt image via Gemini 1.5 Flash.
-Future nodes (math, interview) will be inserted between vision and END.
+Current graph: START → vision → interview → END
+- vision node: extracts items + totals from receipt image via Gemini 2.0 Flash
+- interview node: handles participant assignments via natural language processing
+Future nodes (math) will be inserted between interview and END.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from langgraph.graph import END, START, StateGraph
 from app.database import get_checkpointer
 from app.graph.state import AuditEvent, ReceiptState
 from app.graph.nodes.vision import vision_node
+from app.graph.nodes.interview import interview_node
 
 
 def build_graph() -> Any:
@@ -30,9 +32,11 @@ def build_graph() -> Any:
 	graph = StateGraph(ReceiptState, reducers=reducers)
 
 	graph.add_node("vision", vision_node)
+	graph.add_node("interview", interview_node)
 
 	graph.add_edge(START, "vision")
-	graph.add_edge("vision", END)
+	graph.add_edge("vision", "interview")
+	graph.add_edge("interview", END)
 
 	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
 	if use_in_memory:

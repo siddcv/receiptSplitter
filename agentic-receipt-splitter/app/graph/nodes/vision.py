@@ -64,6 +64,10 @@ def _extract_json(text: str) -> Dict[str, Any]:
     # Strip markdown code fences if present
     cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
     cleaned = re.sub(r"\s*```$", "", cleaned)
+    
+    # Fix double curly braces ({{}} -> {}) - model escape sequence issue
+    cleaned = cleaned.replace("{{", "{").replace("}}", "}")
+    
     return json.loads(cleaned)
 
 
@@ -160,20 +164,48 @@ def _flag_low_confidence(
 # ---------------------------------------------------------------------------
 
 def _get_model() -> ChatGoogleGenerativeAI:
-    """Instantiate the Gemini model from env config."""
-    model_name = os.getenv("VISION_MODEL", "gemini-1.5-flash")
+    """Instantiate the Gemini model from env config with fallback."""
+    model_name = os.getenv("VISION_MODEL", "models/gemini-2.5-flash")
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError("GOOGLE_API_KEY is not set in environment/.env")
 
     max_retries = int(os.getenv("VISION_MAX_RETRIES", "2"))
 
-    return ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=0.0,
-        max_retries=max_retries,
-    )
+    # Try the specified model first
+    try:
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            temperature=0.0,
+            max_retries=max_retries,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create model {model_name}: {e}")
+        
+        # Try fallback models (same as interview component)
+        fallback_models = [
+            "models/gemini-2.5-flash",
+            "models/gemini-2.0-flash", 
+            "models/gemini-2.5-pro"
+        ]
+        
+        for fallback_model in fallback_models:
+            if fallback_model == model_name:
+                continue  # Skip the one we already tried
+            try:
+                logger.info(f"Trying fallback vision model: {fallback_model}")
+                return ChatGoogleGenerativeAI(
+                    model=fallback_model,
+                    google_api_key=api_key,
+                    temperature=0.0,
+                    max_retries=max_retries,
+                )
+            except Exception as fallback_e:
+                logger.warning(f"Fallback model {fallback_model} also failed: {fallback_e}")
+        
+        # If all models fail, raise the original error
+        raise RuntimeError(f"All vision models failed. Last error: {e}")
 
 
 def _call_vision_model(image_path: str) -> Dict[str, Any]:
