@@ -9,7 +9,7 @@ entries without overwriting prior logs.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Optional
 
@@ -27,7 +27,7 @@ class AuditEvent(BaseModel):
 	(e.g., reducers={"audit_log": operator.add}).
 	"""
 
-	timestamp: datetime = Field(default_factory=datetime.utcnow)
+	timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 	node: str = Field(..., description="Graph node that produced this event")
 	message: str = Field(..., description="Human-readable description")
 	details: Optional[Dict] = Field(
@@ -41,11 +41,16 @@ class Item(BaseModel):
 	- name: Item name/description as seen on the receipt.
 	- price: Unit price in USD (quantized to 2 decimal places).
 	- quantity: Number of units (strictly positive).
+	- confidence: Per-field confidence scores from the vision model (0.0–1.0).
 	"""
 
 	name: str = Field(..., min_length=1)
 	price: Decimal = Field(..., description="Unit price, USD")
 	quantity: Decimal = Field(..., description="Units purchased, > 0")
+	confidence: Optional[Dict[str, float]] = Field(
+		default=None,
+		description="Per-field confidence scores, e.g. {'name': 0.95, 'price': 0.90, 'quantity': 0.85}",
+	)
 
 	@field_validator("price")
 	@classmethod
@@ -141,10 +146,17 @@ class ReceiptState(BaseModel):
 	"""
 
 	thread_id: str = Field(..., description="Unique ID for this receipt session")
+	image_path: Optional[str] = Field(
+		default=None, description="Absolute path to the uploaded receipt image"
+	)
 	items: List[Item] = Field(default_factory=list)
 	participants: List[str] = Field(default_factory=list)
 	assignments: List[ItemAssignment] = Field(default_factory=list)
 	totals: Optional[Totals] = Field(default=None)
+	confidence: Optional[Dict[str, float]] = Field(
+		default=None,
+		description="Overall extraction confidence scores from the vision model",
+	)
 	audit_log: List[AuditEvent] = Field(default_factory=list)
 	current_node: Optional[str] = Field(
 		default=None, description="Current graph node name (for status APIs)"

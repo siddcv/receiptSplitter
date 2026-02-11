@@ -95,6 +95,7 @@ async def upload_receipt(file: UploadFile = File(...)) -> Dict[str, Any]:
 	app_graph = _get_graph()
 	initial = ReceiptState(
 		thread_id=thread_id,
+		image_path=str(dest),
 		items=[],
 		participants=[],
 		assignments=[],
