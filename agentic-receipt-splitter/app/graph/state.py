@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -163,6 +163,9 @@ class ReceiptState(BaseModel):
 	)
 	pending_questions: List[str] = Field(
 		default_factory=list, description="Questions to present to the user"
+	)
+	final_costs: Optional[List[Dict[str, Any]]] = Field(
+		default=None, description="Final calculated costs for each participant from math node"
 	)
 
 	@field_validator("participants")

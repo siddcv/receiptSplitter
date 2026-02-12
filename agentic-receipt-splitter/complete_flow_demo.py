@@ -158,8 +158,12 @@ def conduct_interactive_interview(base_url, thread_id, items, totals):
                     print()
                     continue  # Ask again
                 else:
-                    # Success! Show the results
-                    show_final_results(result, items, totals)
+                    # Success! Show the results and calculate final costs
+                    print("\n🎉 **STEP 4: ASSIGNMENT COMPLETE!**")
+                    print("=" * 40)
+                    
+                    show_assignment_results(result, items)
+                    calculate_final_costs(result, totals, thread_id)
                     return
             
             elif response.status_code == 409:
@@ -178,6 +182,160 @@ def conduct_interactive_interview(base_url, thread_id, items, totals):
             break
     
     print(f"\n❌ Could not complete assignment after {max_attempts} attempts")
+
+
+def show_assignment_results(result, items):
+    """Display the assignment results in a clean format."""
+    
+    participants = result.get('participants', [])
+    assignments = result.get('assignments', [])
+    
+    print(f"👥 **Participants:** {', '.join(participants)}")
+    
+    print("\n📊 **Assignment Percentages:**")
+    print("-" * 30)
+    
+    for assignment in assignments:
+        item_idx = assignment['item_index']
+        if item_idx < len(items):
+            item = items[item_idx]
+            item_name = item.get('name', 'Unknown')
+            item_price = float(item.get('price', 0))
+            
+            print(f"[{item_idx}] {item_name} - ${item_price:.2f}")
+            
+            for share in assignment['shares']:
+                participant = share['participant']
+                fraction = float(share['fraction'])
+                
+                if fraction > 0:
+                    print(f"    → {participant}: {fraction*100:.1f}%")
+
+
+def calculate_final_costs(result, totals, thread_id):
+    """Calculate and display final costs using the math node."""
+    
+    print("\n🧮 **STEP 5: CALCULATING FINAL COSTS**")
+    print("=" * 45)
+    
+    try:
+        # Check if math was already calculated
+        if 'final_costs' in result:
+            print("✅ Math calculations found!")
+            display_final_costs(result['final_costs'], totals)
+            return
+        
+        print("🔄 Triggering math node calculation...")
+        
+        # Manually invoke the math node with current state
+        from app.graph.nodes.math import math_node
+        
+        # Convert result to format expected by math node
+        math_state = {
+            'participants': result.get('participants', []),
+            'items': result.get('items', []),
+            'assignments': result.get('assignments', []),
+            'totals': totals,
+            'pending_questions': result.get('pending_questions', [])
+        }
+        
+        print("📊 Running math calculations...")
+        math_result = math_node(math_state)
+        
+        if 'final_costs' in math_result:
+            print("✅ Math calculations completed!")
+            display_final_costs(math_result['final_costs'], totals)
+        elif math_result.get('error_message'):
+            print(f"❌ Math calculation failed: {math_result['error_message']}")
+            if math_result.get('needs_interview'):
+                print("   → Returned to interview for clarification")
+        else:
+            print("⚠️  Math node executed but no final costs returned")
+            print("   This might indicate an unexpected result format")
+                
+    except Exception as e:
+        print(f"❌ Error calculating final costs: {e}")
+        print("Assignment completed successfully, but final cost calculation failed.")
+        import traceback
+        print(f"Details: {traceback.format_exc()}")
+
+
+def display_final_costs(final_costs, receipt_totals):
+    """Display the detailed final cost breakdown."""
+    
+    participant_costs = final_costs.get('participant_costs', [])
+    breakdown = final_costs.get('breakdown', {})
+    validation = final_costs.get('validation', {})
+    
+    print("💰 **FINAL COST BREAKDOWN:**")
+    print("-" * 40)
+    
+    total_calculated = 0.0
+    
+    for pc in participant_costs:
+        participant = pc['participant']
+        subtotal = float(pc['subtotal'])
+        tax_share = float(pc['tax_share'])
+        tip_share = float(pc['tip_share']) 
+        total_owed = float(pc['total_owed'])
+        total_calculated += total_owed
+        
+        print(f"\n👤 **{participant}:**")
+        print(f"   Items subtotal: ${subtotal:.2f}")
+        print(f"   Tax share:      ${tax_share:.2f}")
+        print(f"   Tip share:      ${tip_share:.2f}")
+        print(f"   **TOTAL OWED:   ${total_owed:.2f}** 💵")
+        
+        # Show individual items
+        item_costs = pc.get('item_costs', [])
+        if item_costs:
+            print("   📝 Items:")
+            for item_cost in item_costs:
+                item_name = item_cost['item_name']
+                share_pct = item_cost['share_percentage']
+                cost = item_cost['cost']
+                print(f"      • {item_name}: {share_pct:.1f}% → ${cost:.2f}")
+    
+    print(f"\n🔍 **VALIDATION:**")
+    print("-" * 20)
+    if validation.get('valid'):
+        print("✅ Totals verified!")
+        print(f"   Calculated: ${validation.get('calculated_total', '0.00')}")
+        print(f"   Receipt:    ${validation.get('receipt_total', '0.00')}")
+        print(f"   Difference: ${validation.get('difference', '0.00')}")
+    else:
+        print("⚠️  Validation issues:")
+        print(f"   {validation.get('message', 'Unknown validation error')}")
+    
+    # Show detailed breakdown
+    if breakdown.get('summary'):
+        summary = breakdown['summary']
+        calc_totals = summary.get('calculated_totals', {})
+        receipt_totals_data = summary.get('receipt_totals', {})
+        
+        print(f"\n📊 **BREAKDOWN VERIFICATION:**")
+        print("-" * 35)
+        print("                 Calculated  |  Receipt   |  Match")
+        print("-" * 50)
+        
+        components = [
+            ('Subtotal', 'subtotal'),
+            ('Tax', 'tax'), 
+            ('Tip', 'tip'),
+            ('Grand Total', 'grand_total')
+        ]
+        
+        for label, key in components:
+            calc_val = calc_totals.get(key, '0.00')
+            receipt_val = receipt_totals_data.get(key, '0.00')
+            match = "✅" if calc_val == receipt_val else "❌"
+            print(f"{label:12}: ${calc_val:>8} | ${receipt_val:>8} | {match}")
+    
+    print(f"\n🎊 **RECEIPT SPLITTING COMPLETE!** 🎊")
+    print("=" * 45)
+    print(f"💰 Each person owes the amount shown above")
+    print(f"📱 You can now request payment from each participant")
+    print(f"🧾 Total verified: ${total_calculated:.2f}")
 
 
 def show_final_results(result, items, totals):
