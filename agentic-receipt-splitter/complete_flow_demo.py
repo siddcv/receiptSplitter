@@ -181,7 +181,7 @@ def conduct_interactive_interview(base_url, thread_id, items, totals):
 
 
 def show_final_results(result, items, totals):
-    """Display the final assignment results and cost breakdown."""
+    """Display the final assignment results without cost calculations."""
     
     print("\n🎉 **STEP 4: ASSIGNMENT COMPLETE!**")
     print("=" * 40)
@@ -191,11 +191,8 @@ def show_final_results(result, items, totals):
     
     print(f"👥 **Participants:** {', '.join(participants)}")
     
-    # Calculate what each person owes
-    participant_totals = {p: 0.0 for p in participants}
-    
-    print(f"\n📊 **Detailed Assignment:**")
-    print("-" * 25)
+    print(f"\n📊 **Assignment Percentages:**")
+    print("-" * 30)
     
     for assignment in assignments:
         item_idx = assignment['item_index']
@@ -209,34 +206,28 @@ def show_final_results(result, items, totals):
             for share in assignment['shares']:
                 participant = share['participant']
                 fraction = float(share['fraction'])
-                amount = item_price * fraction
-                participant_totals[participant] += amount
                 
                 if fraction > 0:
-                    print(f"    → {participant}: {fraction*100:.1f}% = ${amount:.2f}")
+                    print(f"    → {participant}: {fraction*100:.1f}%")
     
-    # Show final cost breakdown
-    print(f"\n💸 **FINAL COST BREAKDOWN:**")
-    print("=" * 30)
-    
-    total_assigned = sum(participant_totals.values())
-    
-    for participant in participants:
-        amount = participant_totals[participant]
-        print(f"   {participant:20} ${amount:8.2f}")
-    
-    print(f"   {'-'*20} {'-'*8}")
-    print(f"   {'TOTAL':20} ${total_assigned:8.2f}")
+    print(f"\n✅ **Assignment Summary:**")
+    print("=" * 25)
+    print(f"   • {len(participants)} participants assigned")
+    print(f"   • {len(assignments)} items with percentage splits")
+    print(f"   • Ready for math node to calculate final costs")
     
     if totals:
         receipt_total = float(totals.get('grand_total', 0))
-        if abs(total_assigned - receipt_total) < 0.01:
-            print(f"   ✅ Matches receipt total: ${receipt_total:.2f}")
-        else:
-            print(f"   ⚠️  Receipt total: ${receipt_total:.2f} (difference: ${abs(total_assigned - receipt_total):.2f})")
+        print(f"   • Receipt total: ${receipt_total:.2f} (includes tax + tip)")
+        print(f"   • Tax: ${totals.get('tax_total', 0)}")
+        print(f"   • Tip: ${totals.get('tip_total', 0)}")
     
-    print(f"\n🎊 **Receipt splitting complete!** 🎊")
-    print("Each person now knows exactly what they owe.")
+    print(f"\n🔧 **Next Step: Math Node**")
+    print("The math node will calculate:")
+    print("• Individual item costs based on percentages")
+    print("• Proportional tax and tip distribution") 
+    print("• Final amount each person owes")
+    print(f"\n🎊 **Assignment parsing complete!** 🎊")
 
 
 if __name__ == "__main__":

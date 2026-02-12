@@ -104,7 +104,8 @@ def _generate_participant_questions(items: List) -> List[str]:
             price = item.price
         else:  # Plain dict
             name = item.get("name", "Unknown")
-            price = item.get("price", "0.00")
+            # Try both "unit_price" (from vision extraction) and "price" (standardized)
+            price = item.get("unit_price", item.get("price", "0.00"))
         item_summary.append(f"  [{i}] {name} - ${price}")
     
     question = (
@@ -131,7 +132,8 @@ def _generate_assignment_questions(items: List, participants: List[str]) -> List
             price = item.price
         else:  # Plain dict
             name = item.get("name", "Unknown")
-            price = item.get("price", "0.00")
+            # Try both "unit_price" (from vision extraction) and "price" (standardized)
+            price = item.get("unit_price", item.get("price", "0.00"))
         item_summary.append(f"  [{i}] {name} - ${price}")
     
     participant_list = ", ".join(participants)
@@ -141,14 +143,15 @@ def _generate_assignment_questions(items: List, participants: List[str]) -> List
         "🧾 **Items to assign:**\n"
         + "\n".join(item_summary)
         + "\n\n"
-        "📝 **Step 2: How should we assign these items?**\n"
-        "Please describe who ordered what using a simple format.\n\n"
+        "📝 **Step 2: Who should pay for each item?**\n"
+        "Please describe who ordered or should pay for what items.\n\n"
         "💡 **Assignment Examples:**\n"
         "• 'Alice: 0, 2 | Bob: 1, 3 | Charlie: 4' (by item numbers)\n"
         "• 'Alice had the pizza. Bob got the salad. We split the appetizer.'\n"
         "• '0: Alice | 1: Bob, Charlie (split) | 2: Alice'\n\n"
         "🤝 **For shared items:** Use 'split', 'shared', or list multiple names\n"
-        "📊 **For specific splits:** Add percentages like 'Alice 70%, Bob 30%'"
+        "📊 **For specific splits:** Add percentages like 'Alice 70%, Bob 30%'\n\n"
+        "ℹ️ *Note: Dollar calculations will be done later - just focus on who gets what!*"
     )
     
     return [question]
@@ -229,12 +232,18 @@ def _process_structured_assignment(items: List, participants: List[str], assignm
             "audit_log": [
                 AuditEvent(
                     node="interview",
-                    message=f"Assignment complete - {len(participants)} participants, {len(assignments)} items",
+                    message=f"Assignment complete - {len(participants)} participants, {len(assignments)} items assigned",
                     timestamp=datetime.now(timezone.utc),
                     details={
                         "participant_count": len(participants),
                         "assignment_count": len(assignments),
                         "participants": participants,
+                        "assignment_summary": [
+                            {
+                                "item_index": a.item_index,
+                                "shares": [{"participant": s.participant, "percentage": float(s.fraction) * 100} for s in a.shares]
+                            } for a in assignments
+                        ]
                     },
                 )
             ],
@@ -438,26 +447,6 @@ def _parse_simple_assignment(items: List, participants: List[str], assignment_in
                         )
     
     return assignments
-    """Build a human-readable list of items for the interview prompt."""
-    # Handle both ReceiptState objects and plain dicts
-    if hasattr(state, 'items'):  # ReceiptState object
-        items = state.items
-    else:  # Plain dict
-        items = state.get("items", [])
-        
-    item_lines = []
-    for i, item in enumerate(items):
-        # Handle both Pydantic Item objects and plain dicts
-        if hasattr(item, 'name'):  # Pydantic Item object
-            name = item.name
-            price = item.price
-            quantity = item.quantity
-        else:  # Plain dict
-            name = item.get("name", "Unknown")
-            price = item.get("price", "0.00")
-            quantity = item.get("quantity", "1")
-        item_lines.append(f"  [{i}] {name} — ${price} x {quantity}")
-    return item_lines
 
 
 def _parse_free_form_input(state: Dict[str, Any], items: List, free_form_text: str) -> Dict[str, Any]:
@@ -477,12 +466,14 @@ def _parse_free_form_input(state: Dict[str, Any], items: List, free_form_text: s
     
     # Build context for the LLM
     items_text = "\n".join([
-        f"Item {i}: {item.name if hasattr(item, 'name') else item.get('name', 'Unknown')} - ${item.price if hasattr(item, 'price') else item.get('price', '0.00')}"
+        f"Item {i}: {item.name if hasattr(item, 'name') else item.get('name', 'Unknown')} - ${item.price if hasattr(item, 'price') else item.get('unit_price', item.get('price', '0.00'))}"
         for i, item in enumerate(items)
     ])
     
     system_prompt = """You are an expert at parsing receipt assignment descriptions with excellent fuzzy matching capabilities.
-    
+
+Your ONLY job is to determine WHO gets WHAT PERCENTAGE of each item. Do not calculate dollar amounts.
+
 Given a list of items and a natural language description of who ordered what,
 extract the participants and their share percentages for each item.
 
@@ -498,24 +489,32 @@ Return ONLY a valid JSON object with this structure:
       ]
     }
   ],
-  "unassigned_items": [0, 1, 2],
+  "unassigned_items": [1, 2],
   "ambiguous_assignments": [
     {
       "item_index": 1,
-      "reason": "Could not determine who ordered the 'Za Matriciana' pizza"
+      "reason": "Could not determine who ordered this item - please clarify"
     }
   ]
 }
 
-CRITICAL RULES:
+CRITICAL ASSIGNMENT RULES:
 1. Percentages must sum to exactly 100.0 for each item
 2. Handle fuzzy matching: "pizza" can match "Porky Pepperoni", "wine" can match "Scribe Rose GL"
 3. Handle abbreviations and partial matches intelligently
-4. If someone "shared" equally between N people, use (100/N)% for each
+4. When someone says "split" or "shared", divide equally between mentioned people
 5. ALL items must be assigned - if unclear, ask for clarification via ambiguous_assignments
 6. Include all item indices in assignments array, even if 0% for some participants
-7. Extract participant names as they appear in text (capitalize first letter)
-8. If multiple items could match a description, list them in ambiguous_assignments"""
+7. Extract participant names as they appear in text (capitalize first letter, be consistent)
+8. If multiple items could match a description, list them in ambiguous_assignments
+
+CLARIFICATION STRATEGY:
+- Be specific about what's unclear
+- Suggest concrete solutions
+- Ask about unassigned items clearly
+- For ambiguous matches, explain the confusion
+
+Focus ONLY on WHO gets WHAT PERCENTAGE. Dollar calculations happen later."""
 
     user_prompt = f"""Items from receipt:
 {items_text}
@@ -694,12 +693,13 @@ def _validate_and_accept(items: List, participants: List[str], assignments: List
         "audit_log": [
             AuditEvent(
                 node="interview",
-                message=f"Accepted assignments for {len(participants)} participants across {len(validated_assignments)} items",
+                message=f"Assignment parsing complete: {len(participants)} participants, {len(validated_assignments)} items assigned with percentages",
                 timestamp=datetime.now(timezone.utc),
                 details={
                     "participant_count": len(participants),
                     "assignment_count": len(validated_assignments),
                     "participants": participants,
+                    "ready_for_math_node": True,
                 },
             )
         ],
@@ -715,13 +715,19 @@ def interview_node(state: Dict[str, Any]) -> Dict[str, Any]:
         participants = getattr(state, 'participants', [])
         participant_input = getattr(state, 'participant_input', "") or ""
         assignment_input = getattr(state, 'assignment_input', "") or ""
+        free_form_assignment = getattr(state, 'free_form_assignment', "") or ""
     else:  # Plain dict
         items = state.get("items", [])
         participants = state.get("participants", [])
         participant_input = state.get("participant_input", "") or ""
         assignment_input = state.get("assignment_input", "") or ""
+        free_form_assignment = state.get("free_form_assignment", "") or ""
     
-    # Step 1: Collect participants first
+    # Priority 1: Handle free-form assignment input (contains both participants and assignments)
+    if free_form_assignment.strip():
+        return _parse_free_form_input(state, items, free_form_assignment.strip())
+    
+    # Priority 2: Step 1 - Collect participants first
     if not participants and participant_input.strip():
         # Parse participant names from input
         participant_names = [name.strip().title() for name in participant_input.split(',') if name.strip()]
@@ -751,7 +757,7 @@ def interview_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 ],
             }
     
-    # Step 2: Handle assignments (if participants already exist)
+    # Priority 3: Step 2 - Handle assignments (if participants already exist)
     if participants and assignment_input.strip():
         return _process_structured_assignment(items, participants, assignment_input)
     
