@@ -208,10 +208,34 @@ async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, 
 				detail="No state found for thread_id (in-memory mode).",
 			)
 	else:
-		raise HTTPException(
-			status_code=501,
-			detail="Interview re-invocation with Postgres checkpointer not yet implemented.",
-		)
+		# Postgres mode — retrieve state from LangGraph checkpointer
+		app_graph = _get_graph()
+		cfg = {"configurable": {"thread_id": thread_id}}
+		try:
+			snapshot = app_graph.get_state(cfg)
+		except Exception as e:
+			raise HTTPException(
+				status_code=500,
+				detail=f"Failed to retrieve state: {e}",
+			)
+		if snapshot is None:
+			raise HTTPException(
+				status_code=404,
+				detail="No state found for thread_id.",
+			)
+		# snapshot.values is the state dict
+		if hasattr(snapshot, "values"):
+			existing = snapshot.values
+		elif isinstance(snapshot, dict):
+			existing = snapshot
+		else:
+			try:
+				existing = snapshot.dict()
+			except Exception:
+				raise HTTPException(
+					status_code=500,
+					detail="Could not deserialise state from checkpointer.",
+				)
 
 	# Verify the graph is waiting for interview input
 	if isinstance(existing, dict):
@@ -282,6 +306,16 @@ async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, 
 	# Store updated state
 	if use_in_memory:
 		_INMEM_STORE[thread_id] = merged_state
+	else:
+		# Postgres mode — update state via graph invoke so the checkpointer persists it
+		try:
+			app_graph = _get_graph()
+			cfg = {"configurable": {"thread_id": thread_id}}
+			app_graph.update_state(cfg, merged_state)
+		except Exception as e:
+			# Log but don't fail — business persistence already happened in the node
+			import logging
+			logging.getLogger(__name__).error(f"Failed to update checkpointer state: {e}")
 
 	return {"thread_id": thread_id, "state": merged_state}
 

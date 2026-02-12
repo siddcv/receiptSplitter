@@ -27,6 +27,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.graph.state import AuditEvent, Item, ReceiptState, Totals
 from app.prompts.vision_prompt import VISION_SYSTEM_PROMPT, VISION_USER_PROMPT
+from app.persistence import save_vision_data, PersistenceError
 
 load_dotenv(override=False)
 
@@ -313,7 +314,8 @@ def vision_node(state: ReceiptState) -> Dict[str, Any]:
         },
     )
 
-    return {
+    # Prepare the result state
+    result_state = {
         "items": items,
         "totals": totals,
         "confidence": totals_confidence,
@@ -321,3 +323,52 @@ def vision_node(state: ReceiptState) -> Dict[str, Any]:
         "audit_log": [audit],
         "pending_questions": questions,
     }
+    
+    # Persist business data to PostgreSQL (if not in memory mode)
+    use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+    if not use_in_memory:
+        try:
+            # Build state dict for persistence (combine current state with results)
+            if hasattr(state, 'model_dump'):
+                current_state = state.model_dump()
+            elif hasattr(state, 'dict'):
+                current_state = state.dict()
+            else:
+                current_state = dict(state) if isinstance(state, dict) else {}
+            
+            # Merge in the new results
+            persistence_state = {**current_state, **result_state}
+            
+            # Save to business tables
+            save_vision_data(persistence_state)
+            
+            # Add success audit event
+            persistence_audit = AuditEvent(
+                node="vision",
+                message="Business data persisted to PostgreSQL",
+                timestamp=datetime.now(timezone.utc),
+                details={"tables": ["receipts", "receipt_items", "audit_logs"]}
+            )
+            result_state["audit_log"].append(persistence_audit)
+            
+        except PersistenceError as e:
+            logger.error(f"Failed to persist vision data: {e}")
+            # Add failure audit event but don't fail the workflow
+            error_audit = AuditEvent(
+                node="vision", 
+                message=f"Business persistence failed: {str(e)[:100]}",
+                timestamp=datetime.now(timezone.utc),
+                details={"error_type": "persistence_failure"}
+            )
+            result_state["audit_log"].append(error_audit)
+        except Exception as e:
+            logger.error(f"Unexpected error in business persistence: {e}")
+            error_audit = AuditEvent(
+                node="vision",
+                message=f"Persistence error: {str(e)[:100]}", 
+                timestamp=datetime.now(timezone.utc),
+                details={"error_type": "unexpected_persistence_error"}
+            )
+            result_state["audit_log"].append(error_audit)
+
+    return result_state

@@ -716,16 +716,19 @@ def interview_node(state: Dict[str, Any]) -> Dict[str, Any]:
         participant_input = getattr(state, 'participant_input', "") or ""
         assignment_input = getattr(state, 'assignment_input', "") or ""
         free_form_assignment = getattr(state, 'free_form_assignment', "") or ""
+        thread_id = getattr(state, 'thread_id', "")
     else:  # Plain dict
         items = state.get("items", [])
         participants = state.get("participants", [])
         participant_input = state.get("participant_input", "") or ""
         assignment_input = state.get("assignment_input", "") or ""
         free_form_assignment = state.get("free_form_assignment", "") or ""
+        thread_id = state.get("thread_id", "")
     
     # Priority 1: Handle free-form assignment input (contains both participants and assignments)
     if free_form_assignment.strip():
-        return _parse_free_form_input(state, items, free_form_assignment.strip())
+        result = _parse_free_form_input(state, items, free_form_assignment.strip())
+        return _maybe_persist_interview(result, thread_id)
     
     # Priority 2: Step 1 - Collect participants first
     if not participants and participant_input.strip():
@@ -759,7 +762,8 @@ def interview_node(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Priority 3: Step 2 - Handle assignments (if participants already exist)
     if participants and assignment_input.strip():
-        return _process_structured_assignment(items, participants, assignment_input)
+        result = _process_structured_assignment(items, participants, assignment_input)
+        return _maybe_persist_interview(result, thread_id)
     
     # Phase 1: Ask for participants first
     if not participants:
@@ -805,3 +809,51 @@ def interview_node(state: Dict[str, Any]) -> Dict[str, Any]:
             )
         ],
     }
+
+
+def _maybe_persist_interview(result: Dict[str, Any], thread_id: str) -> Dict[str, Any]:
+    """Persist interview data to PostgreSQL if the result is a complete assignment."""
+    # Only persist when assignments are complete (has participants + assignments + no pending questions)
+    has_participants = bool(result.get("participants"))
+    has_assignments = bool(result.get("assignments"))
+    no_pending = not result.get("pending_questions")
+
+    if not (has_participants and has_assignments and no_pending):
+        return result
+
+    use_in_memory = os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"}
+    if use_in_memory or not thread_id:
+        return result
+
+    try:
+        from app.persistence import save_interview_data, PersistenceError
+
+        persistence_state = {
+            "thread_id": thread_id,
+            "participants": result["participants"],
+            "assignments": result["assignments"],
+            "audit_log": result.get("audit_log", []),
+        }
+        save_interview_data(persistence_state)
+
+        # Append a success audit event
+        result.setdefault("audit_log", []).append(
+            AuditEvent(
+                node="interview",
+                message="Interview data persisted to PostgreSQL",
+                timestamp=datetime.now(timezone.utc),
+                details={"tables": ["participants", "assignments", "audit_logs"]},
+            )
+        )
+    except Exception as e:
+        logger.error(f"Failed to persist interview data: {e}")
+        # Non-fatal — the workflow continues even if persistence fails
+        result.setdefault("audit_log", []).append(
+            AuditEvent(
+                node="interview",
+                message=f"Interview persistence failed: {e}",
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    return result
