@@ -130,9 +130,33 @@ class ItemAssignment(BaseModel):
 	@model_validator(mode="after")
 	def _validate_shares_sum(self) -> "ItemAssignment":
 		total = sum((s.fraction for s in self.shares), Decimal("0"))
-		# Allow exact 1.00 only
-		if total.quantize(TWO_DP, rounding=ROUND_HALF_UP) != Decimal("1.00"):
+		
+		# Check if we're close to 1.00 (within rounding tolerance)
+		rounded_total = total.quantize(TWO_DP, rounding=ROUND_HALF_UP)
+		
+		if rounded_total == Decimal("1.00"):
+			# Perfect - no adjustment needed
+			return self
+		
+		# Handle small rounding errors (e.g., 0.99 or 1.01 due to 0.33 + 0.33 + 0.33 = 0.99)
+		difference = Decimal("1.00") - rounded_total
+		tolerance = Decimal("0.03")  # Allow up to 3 cents difference for rounding
+		
+		if abs(difference) <= tolerance and len(self.shares) > 0:
+			# Adjust the largest share to make the total exactly 1.00
+			largest_share_idx = max(range(len(self.shares)), 
+									key=lambda i: self.shares[i].fraction)
+			
+			# Add the difference to the largest share
+			self.shares[largest_share_idx].fraction += difference
+			
+			# Re-check the total
+			new_total = sum((s.fraction for s in self.shares), Decimal("0"))
+			if new_total.quantize(TWO_DP, rounding=ROUND_HALF_UP) != Decimal("1.00"):
+				raise ValueError("sum of shares.fraction must equal 1.00 for each item")
+		else:
 			raise ValueError("sum of shares.fraction must equal 1.00 for each item")
+		
 		return self
 
 
