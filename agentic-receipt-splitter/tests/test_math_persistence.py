@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 # ── ensure project root is on sys.path ──────────────────────────────────
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 os.environ.setdefault("USE_IN_MEMORY", "0")
 
 from psycopg import connect

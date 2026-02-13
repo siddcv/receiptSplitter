@@ -6,6 +6,7 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Drop in dependency order (children -> parents)
+DROP TABLE IF EXISTS final_costs CASCADE;
 DROP TABLE IF EXISTS assignments CASCADE;
 DROP TABLE IF EXISTS receipt_items CASCADE;
 DROP TABLE IF EXISTS participants CASCADE;
@@ -59,6 +60,24 @@ CREATE TABLE assignments (
 );
 CREATE INDEX idx_assignments_item ON assignments(item_id);
 CREATE INDEX idx_assignments_participant ON assignments(participant_id);
+
+-- Final per-participant costs calculated by the math node
+DROP TABLE IF EXISTS final_costs CASCADE;
+CREATE TABLE final_costs (
+    id BIGSERIAL PRIMARY KEY,
+    receipt_id      TEXT NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+    participant_id  UUID NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    subtotal        NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (subtotal >= 0),
+    tax_share       NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (tax_share >= 0),
+    tip_share       NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (tip_share >= 0),
+    fees_share      NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (fees_share >= 0),
+    total_owed      NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (total_owed >= 0),
+    item_costs      JSONB,          -- detailed per-item cost breakdown
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT final_costs_unique_per_participant UNIQUE (receipt_id, participant_id)
+);
+CREATE INDEX idx_final_costs_receipt ON final_costs(receipt_id);
+CREATE INDEX idx_final_costs_participant ON final_costs(participant_id);
 
 -- Optional: audit log to mirror the in-app audit trail (useful for reporting)
 CREATE TABLE audit_logs (

@@ -14,7 +14,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 
 # Ensure project root is on sys.path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 from dotenv import load_dotenv
 load_dotenv(override=False)
 

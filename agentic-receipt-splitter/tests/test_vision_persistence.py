@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 
 from psycopg import connect
 from app.database import get_database_url
