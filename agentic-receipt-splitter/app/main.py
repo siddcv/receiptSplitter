@@ -300,6 +300,18 @@ async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, 
 		else:
 			merged_state[key] = value
 
+	# If interview is complete (no pending questions), run the math node
+	if not merged_state.get("pending_questions"):
+		from app.graph.nodes.math import math_node
+		math_result = math_node(merged_state)
+
+		for key, value in math_result.items():
+			if key == "audit_log":
+				merged_state.setdefault("audit_log", [])
+				merged_state["audit_log"] = merged_state["audit_log"] + value
+			else:
+				merged_state[key] = value
+
 	# Serialize any Pydantic models for JSON storage
 	merged_state = _serialize_state(merged_state)
 
@@ -330,7 +342,11 @@ def _serialize_state(state: Dict[str, Any]) -> Dict[str, Any]:
 		if isinstance(obj, Decimal):
 			return str(obj)
 		if isinstance(obj, datetime):
-			return obj.isoformat() + "Z"  # ISO format with Z suffix
+			# If timezone-aware, isoformat() already includes the offset — don't add Z
+			# If naive, assume UTC and append Z
+			if obj.tzinfo is not None:
+				return obj.isoformat()
+			return obj.isoformat() + "Z"
 		if hasattr(obj, "model_dump"):
 			return obj.model_dump()
 		if hasattr(obj, "dict"):
@@ -364,7 +380,7 @@ async def create_mock_state(body: MockStateRequest) -> Dict[str, Any]:
 			detail="Mock state creation only available in in-memory mode."
 		)
 
-	from datetime import datetime
+	from datetime import datetime, timezone
 
 	# Build mock state
 	mock_state = {
@@ -377,7 +393,7 @@ async def create_mock_state(body: MockStateRequest) -> Dict[str, Any]:
 		"current_node": body.current_node,
 		"audit_log": [
 			{
-				"timestamp": datetime.now().isoformat() + "Z",
+				"timestamp": datetime.now(timezone.utc).isoformat(),
 				"node": "test",
 				"message": f"Created mock state with {len(body.items)} items",
 				"details": {"mock": True, "item_count": len(body.items)},

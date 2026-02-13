@@ -515,3 +515,175 @@ def save_interview_data(state: Dict[str, Any]) -> None:
             f"❌ Unexpected error persisting interview data for {thread_id}: {e}"
         )
         raise PersistenceError(f"Failed to persist interview data: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Math node persistence
+# ---------------------------------------------------------------------------
+
+def save_final_costs(
+    thread_id: str,
+    participant_costs: List[Dict[str, Any]],
+) -> int:
+    """
+    Save per-participant final cost rows to the final_costs table.
+
+    Looks up participant UUIDs from the participants table by name.
+    Old rows for the same receipt are deleted first (idempotent).
+
+    Args:
+        thread_id: Receipt identifier (FK to receipts.id)
+        participant_costs: List of dicts with keys:
+            participant, subtotal, tax_share, tip_share,
+            fees_share, total_owed, item_costs
+
+    Returns:
+        Number of rows inserted
+
+    Raises:
+        PersistenceError: If database operation fails
+    """
+    if not participant_costs:
+        logger.warning(f"No participant costs for {thread_id}, skipping")
+        return 0
+
+    try:
+        dsn = get_database_url()
+        rows_inserted = 0
+
+        with connect(dsn) as conn:
+            with conn.cursor() as cur:
+                # Build a name → UUID lookup from the participants table
+                cur.execute(
+                    "SELECT id, name FROM participants WHERE receipt_id = %s",
+                    (thread_id,),
+                )
+                name_to_id = {row[1]: str(row[0]) for row in cur.fetchall()}
+
+                if not name_to_id:
+                    logger.warning(
+                        f"No participants found in DB for {thread_id} — "
+                        "cannot save final costs (interview data may not be persisted yet)"
+                    )
+                    return 0
+
+                # Delete previous final_costs for this receipt (idempotent)
+                cur.execute(
+                    "DELETE FROM final_costs WHERE receipt_id = %s",
+                    (thread_id,),
+                )
+
+                for pc in participant_costs:
+                    name = pc.get("participant", "")
+                    participant_id = name_to_id.get(name)
+                    if not participant_id:
+                        logger.warning(
+                            f"Participant '{name}' not in participants table, skipping"
+                        )
+                        continue
+
+                    subtotal = Decimal(str(pc.get("subtotal", 0)))
+                    tax_share = Decimal(str(pc.get("tax_share", 0)))
+                    tip_share = Decimal(str(pc.get("tip_share", 0)))
+                    fees_share = Decimal(str(pc.get("fees_share", 0)))
+                    total_owed = Decimal(str(pc.get("total_owed", 0)))
+                    item_costs = pc.get("item_costs")
+
+                    cur.execute(
+                        """
+                        INSERT INTO final_costs
+                            (receipt_id, participant_id, subtotal,
+                             tax_share, tip_share, fees_share,
+                             total_owed, item_costs)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (receipt_id, participant_id) DO UPDATE SET
+                            subtotal   = EXCLUDED.subtotal,
+                            tax_share  = EXCLUDED.tax_share,
+                            tip_share  = EXCLUDED.tip_share,
+                            fees_share = EXCLUDED.fees_share,
+                            total_owed = EXCLUDED.total_owed,
+                            item_costs = EXCLUDED.item_costs
+                        """,
+                        (
+                            thread_id,
+                            participant_id,
+                            subtotal,
+                            tax_share,
+                            tip_share,
+                            fees_share,
+                            total_owed,
+                            Jsonb(item_costs) if item_costs else None,
+                        ),
+                    )
+                    rows_inserted += 1
+
+                conn.commit()
+                logger.info(
+                    f"✅ Saved {rows_inserted} final_cost rows for {thread_id}"
+                )
+        return rows_inserted
+
+    except (OperationalError, IntegrityError) as e:
+        logger.error(f"❌ DB error saving final costs for {thread_id}: {e}")
+        raise PersistenceError(f"Failed to save final costs: {e}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error saving final costs for {thread_id}: {e}")
+        raise PersistenceError(f"Unexpected error saving final costs: {e}")
+
+
+def save_math_data(state: Dict[str, Any]) -> None:
+    """
+    Orchestrator: persist all math-node data to business tables.
+
+    Called after the math node completes successfully.
+    Saves per-participant final costs and audit events.
+
+    Args:
+        state: Workflow state dict containing final_costs + audit_log
+
+    Raises:
+        PersistenceError: If any persistence operation fails
+    """
+    def _g(key, default=None):
+        if isinstance(state, dict):
+            return state.get(key, default)
+        return getattr(state, key, default)
+
+    thread_id = _g("thread_id")
+    if not thread_id:
+        logger.warning("No thread_id in state, cannot save math data")
+        return
+
+    final_costs = _g("final_costs")
+    if not final_costs:
+        logger.warning(f"No final_costs in state for {thread_id}, skipping")
+        return
+
+    # Extract participant_costs list from the final_costs dict
+    participant_costs = final_costs.get("participant_costs", []) if isinstance(final_costs, dict) else []
+    if not participant_costs:
+        logger.warning(f"No participant_costs in final_costs for {thread_id}, skipping")
+        return
+
+    logger.info(f"💾 Persisting math data for {thread_id}")
+
+    try:
+        # 1. Final costs → final_costs table
+        save_final_costs(thread_id, participant_costs)
+
+        # 2. Audit events (math-specific ones)
+        audit_log = _g("audit_log", [])
+        if audit_log:
+            save_audit_events(thread_id, audit_log)
+
+        logger.info(
+            f"✅ Successfully persisted all math data for {thread_id}"
+        )
+
+    except PersistenceError:
+        raise
+    except Exception as e:
+        logger.error(
+            f"❌ Unexpected error persisting math data for {thread_id}: {e}"
+        )
+        raise PersistenceError(f"Failed to persist math data: {e}")

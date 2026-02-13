@@ -12,6 +12,7 @@ The math node only runs after interview completion (no pending questions).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List
@@ -21,6 +22,15 @@ from app.graph.state import AuditEvent, ReceiptState
 logger = logging.getLogger(__name__)
 
 TWO_DP = Decimal("0.01")
+
+
+def _get(obj, key, default=0):
+    """Access a field from a Pydantic model or a dict transparently."""
+    if hasattr(obj, key):
+        return getattr(obj, key)
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
 
 
 class ParticipantCost(dict):
@@ -102,9 +112,9 @@ def _distribute_taxes_tips_fees(participant_costs: List[ParticipantCost], totals
         return participant_costs
     
     # Get totals
-    tax_total = Decimal(str(totals.get('tax_total', 0)))
-    tip_total = Decimal(str(totals.get('tip_total', 0)))
-    fees_total = Decimal(str(totals.get('fees_total', 0)))
+    tax_total = Decimal(str(_get(totals, 'tax_total', 0)))
+    tip_total = Decimal(str(_get(totals, 'tip_total', 0)))
+    fees_total = Decimal(str(_get(totals, 'fees_total', 0)))
     
     # Calculate total subtotal across all participants
     total_subtotal = sum(pc['subtotal'] for pc in participant_costs)
@@ -179,7 +189,7 @@ def _validate_total_matches_receipt(participant_costs: List[ParticipantCost], to
     calculated_total = sum(pc['total_owed'] for pc in participant_costs)
     
     # Get receipt total
-    receipt_total = Decimal(str(totals.get('grand_total', 0)))
+    receipt_total = Decimal(str(_get(totals, 'grand_total', 0)))
     
     # Check if they match (allowing for minimal rounding differences)
     difference = abs(calculated_total - receipt_total)
@@ -210,11 +220,11 @@ def _generate_cost_breakdown(participant_costs: List[ParticipantCost], totals: D
         'summary': {
             'total_participants': len(participant_costs),
             'receipt_totals': {
-                'subtotal': str(totals.get('subtotal', 0)) if totals else '0.00',
-                'tax': str(totals.get('tax_total', 0)) if totals else '0.00', 
-                'tip': str(totals.get('tip_total', 0)) if totals else '0.00',
-                'fees': str(totals.get('fees_total', 0)) if totals else '0.00',
-                'grand_total': str(totals.get('grand_total', 0)) if totals else '0.00'
+                'subtotal': str(_get(totals, 'subtotal', 0)) if totals else '0.00',
+                'tax': str(_get(totals, 'tax_total', 0)) if totals else '0.00', 
+                'tip': str(_get(totals, 'tip_total', 0)) if totals else '0.00',
+                'fees': str(_get(totals, 'fees_total', 0)) if totals else '0.00',
+                'grand_total': str(_get(totals, 'grand_total', 0)) if totals else '0.00'
             },
             'calculated_totals': {
                 'subtotal': str(sum(pc['subtotal'] for pc in participant_costs)),
@@ -250,12 +260,14 @@ def math_node(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Handle both ReceiptState objects and plain dicts
     if hasattr(state, 'items') and hasattr(state, 'model_dump'):  # ReceiptState object
+        thread_id = getattr(state, 'thread_id', '')
         items = getattr(state, 'items', [])
         participants = getattr(state, 'participants', [])
         assignments = getattr(state, 'assignments', [])
         totals = getattr(state, 'totals', None)
         pending_questions = getattr(state, 'pending_questions', [])
     else:  # Plain dict
+        thread_id = state.get("thread_id", "")
         items = state.get("items", [])
         participants = state.get("participants", [])
         assignments = state.get("assignments", [])
@@ -351,7 +363,7 @@ def math_node(state: Dict[str, Any]) -> Dict[str, Any]:
             }
             final_costs.append(cost_dict)
         
-        return {
+        result = {
             "final_costs": {
                 'participant_costs': final_costs,
                 'breakdown': breakdown,
@@ -378,6 +390,8 @@ def math_node(state: Dict[str, Any]) -> Dict[str, Any]:
             ],
         }
         
+        return _maybe_persist_math(result, thread_id)
+        
     except Exception as e:
         return {
             "audit_log": [
@@ -389,3 +403,50 @@ def math_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
             ],
         }
+
+
+def _maybe_persist_math(result: Dict[str, Any], thread_id: str) -> Dict[str, Any]:
+    """Persist math data to PostgreSQL if the result contains final_costs."""
+    final_costs = result.get("final_costs")
+    if not final_costs:
+        return result
+
+    participant_costs = final_costs.get("participant_costs", []) if isinstance(final_costs, dict) else []
+    if not participant_costs:
+        return result
+
+    use_in_memory = os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"}
+    if use_in_memory or not thread_id:
+        return result
+
+    try:
+        from app.persistence import save_math_data, PersistenceError
+
+        persistence_state = {
+            "thread_id": thread_id,
+            "final_costs": final_costs,
+            "audit_log": result.get("audit_log", []),
+        }
+        save_math_data(persistence_state)
+
+        # Append a success audit event
+        result.setdefault("audit_log", []).append(
+            AuditEvent(
+                node="math",
+                message="Math data persisted to PostgreSQL",
+                timestamp=datetime.now(timezone.utc),
+                details={"tables": ["final_costs", "audit_logs"]},
+            )
+        )
+    except Exception as e:
+        logger.error(f"Failed to persist math data: {e}")
+        # Non-fatal — the workflow continues even if persistence fails
+        result.setdefault("audit_log", []).append(
+            AuditEvent(
+                node="math",
+                message=f"Math persistence failed: {e}",
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    return result
