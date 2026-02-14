@@ -1,75 +1,78 @@
 """
-Minimal LangGraph wiring for Step 1: persistence smoke test.
+LangGraph workflow wiring for the Agentic Receipt Splitter.
 
-This constructs a trivial graph that simply echoes the input state, compiled
-with the PostgresSaver checkpointer so we can save and retrieve by thread_id.
+Current graph: START → vision → interview → math → END
+- vision node: extracts items + totals from receipt image via Gemini 2.0 Flash
+- interview node: handles participant assignments via natural language processing
+- math node: calculates final costs including tax/tip distribution
 """
 
 from __future__ import annotations
 
 import operator
+import os
 from typing import Any, Dict
 
 from langgraph.graph import END, START, StateGraph
 
 from app.database import get_checkpointer
 from app.graph.state import AuditEvent, ReceiptState
+from app.graph.nodes.vision import vision_node
+from app.graph.nodes.interview import interview_node
+from app.graph.nodes.math import math_node
 
 
-def _noop_node(state: ReceiptState) -> ReceiptState:
-	"""A pass-through node that returns the state unchanged."""
-	return state
+def should_proceed_to_math(state: Dict[str, Any]) -> str:
+	"""Conditional edge: only proceed to math if interview is complete."""
+	
+	# Handle both ReceiptState objects and plain dicts
+	if hasattr(state, 'pending_questions'):
+		pending_questions = getattr(state, 'pending_questions', [])
+	else:
+		pending_questions = state.get("pending_questions", [])
+	
+	# If there are pending questions, stay at interview (end workflow for now)
+	if pending_questions:
+		return END
+	
+	# If no pending questions, proceed to math
+	return "math"
 
 
 def build_graph() -> Any:
-	"""Build and compile the trivial graph with audit log reducer and checkpointer."""
+	"""Build and compile the receipt-processing graph.
+
+	Honors env toggle USE_IN_MEMORY:
+	- If set to '1'/'true', compiles WITHOUT a checkpointer (no DB required).
+	- Otherwise, compiles with Postgres checkpointer for persistence.
+	"""
 	reducers = {"audit_log": operator.add}
 	graph = StateGraph(ReceiptState, reducers=reducers)
-	graph.add_node("noop", _noop_node)
-	graph.add_edge(START, "noop")
-	graph.add_edge("noop", END)
 
-	checkpointer = get_checkpointer()
-	app_graph = graph.compile(checkpointer=checkpointer)
-	return app_graph
+	graph.add_node("vision", vision_node)
+	graph.add_node("interview", interview_node)
+	graph.add_node("math", math_node)
 
-
-def run_dummy(thread_id: str = "demo-thread-1") -> Dict[str, Any]:
-	"""Invoke the graph with a minimal state and return the final state snapshot.
-
-	This provides a simple smoke test that verifies:
-	- we can compile with a Postgres checkpointer
-	- we can invoke with a given thread_id
-	- we can retrieve saved state after invocation
-	"""
-	app_graph = build_graph()
-
-	initial = ReceiptState(
-		thread_id=thread_id,
-		items=[],
-		participants=[],
-		assignments=[],
-		totals=None,
-		audit_log=[
-			AuditEvent(node="noop", message="initialized dummy state for smoke test")
-		],
-		current_node="noop",
-		pending_questions=[],
+	graph.add_edge(START, "vision")
+	graph.add_edge("vision", "interview")
+	
+	# Conditional edge: only proceed to math if interview is complete
+	graph.add_conditional_edges(
+		"interview",
+		should_proceed_to_math,
+		{
+			"math": "math",
+			END: END
+		}
 	)
+	
+	graph.add_edge("math", END)
 
-	cfg = {"configurable": {"thread_id": thread_id}}
-	result = app_graph.invoke(initial, config=cfg)
-
-	# Attempt to retrieve the latest saved state for this thread
-	# Some versions expose get_state; if unavailable, return the result of invoke
-	get_state = getattr(app_graph, "get_state", None)
-	if callable(get_state):
-		saved = get_state(cfg)
-		# saved may be a dict or a model; normalize to dict for display
-		try:
-			return saved if isinstance(saved, dict) else saved.dict()
-		except Exception:
-			# Fallback if .dict() isn't available
-			return result if isinstance(result, dict) else {}
-	return result if isinstance(result, dict) else {}
+	use_in_memory = (os.getenv("USE_IN_MEMORY", "").lower() in {"1", "true", "yes"})
+	if use_in_memory:
+		app_graph = graph.compile()
+	else:
+		checkpointer = get_checkpointer()
+		app_graph = graph.compile(checkpointer=checkpointer)
+	return app_graph
 

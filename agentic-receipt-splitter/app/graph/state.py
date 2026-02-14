@@ -9,9 +9,9 @@ entries without overwriting prior logs.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -27,7 +27,7 @@ class AuditEvent(BaseModel):
 	(e.g., reducers={"audit_log": operator.add}).
 	"""
 
-	timestamp: datetime = Field(default_factory=datetime.utcnow)
+	timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 	node: str = Field(..., description="Graph node that produced this event")
 	message: str = Field(..., description="Human-readable description")
 	details: Optional[Dict] = Field(
@@ -41,11 +41,16 @@ class Item(BaseModel):
 	- name: Item name/description as seen on the receipt.
 	- price: Unit price in USD (quantized to 2 decimal places).
 	- quantity: Number of units (strictly positive).
+	- confidence: Per-field confidence scores from the vision model (0.0–1.0).
 	"""
 
 	name: str = Field(..., min_length=1)
 	price: Decimal = Field(..., description="Unit price, USD")
 	quantity: Decimal = Field(..., description="Units purchased, > 0")
+	confidence: Optional[Dict[str, float]] = Field(
+		default=None,
+		description="Per-field confidence scores, e.g. {'name': 0.95, 'price': 0.90, 'quantity': 0.85}",
+	)
 
 	@field_validator("price")
 	@classmethod
@@ -125,9 +130,33 @@ class ItemAssignment(BaseModel):
 	@model_validator(mode="after")
 	def _validate_shares_sum(self) -> "ItemAssignment":
 		total = sum((s.fraction for s in self.shares), Decimal("0"))
-		# Allow exact 1.00 only
-		if total.quantize(TWO_DP, rounding=ROUND_HALF_UP) != Decimal("1.00"):
+		
+		# Check if we're close to 1.00 (within rounding tolerance)
+		rounded_total = total.quantize(TWO_DP, rounding=ROUND_HALF_UP)
+		
+		if rounded_total == Decimal("1.00"):
+			# Perfect - no adjustment needed
+			return self
+		
+		# Handle small rounding errors (e.g., 0.99 or 1.01 due to 0.33 + 0.33 + 0.33 = 0.99)
+		difference = Decimal("1.00") - rounded_total
+		tolerance = Decimal("0.03")  # Allow up to 3 cents difference for rounding
+		
+		if abs(difference) <= tolerance and len(self.shares) > 0:
+			# Adjust the largest share to make the total exactly 1.00
+			largest_share_idx = max(range(len(self.shares)), 
+									key=lambda i: self.shares[i].fraction)
+			
+			# Add the difference to the largest share
+			self.shares[largest_share_idx].fraction += difference
+			
+			# Re-check the total
+			new_total = sum((s.fraction for s in self.shares), Decimal("0"))
+			if new_total.quantize(TWO_DP, rounding=ROUND_HALF_UP) != Decimal("1.00"):
+				raise ValueError("sum of shares.fraction must equal 1.00 for each item")
+		else:
 			raise ValueError("sum of shares.fraction must equal 1.00 for each item")
+		
 		return self
 
 
@@ -141,16 +170,26 @@ class ReceiptState(BaseModel):
 	"""
 
 	thread_id: str = Field(..., description="Unique ID for this receipt session")
+	image_path: Optional[str] = Field(
+		default=None, description="Absolute path to the uploaded receipt image"
+	)
 	items: List[Item] = Field(default_factory=list)
 	participants: List[str] = Field(default_factory=list)
 	assignments: List[ItemAssignment] = Field(default_factory=list)
 	totals: Optional[Totals] = Field(default=None)
+	confidence: Optional[Dict[str, float]] = Field(
+		default=None,
+		description="Overall extraction confidence scores from the vision model",
+	)
 	audit_log: List[AuditEvent] = Field(default_factory=list)
 	current_node: Optional[str] = Field(
 		default=None, description="Current graph node name (for status APIs)"
 	)
 	pending_questions: List[str] = Field(
 		default_factory=list, description="Questions to present to the user"
+	)
+	final_costs: Optional[List[Dict[str, Any]]] = Field(
+		default=None, description="Final calculated costs for each participant from math node"
 	)
 
 	@field_validator("participants")

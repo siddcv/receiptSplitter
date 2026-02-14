@@ -1,0 +1,48 @@
+# Render Blueprint — Infrastructure-as-Code
+# https://docs.render.com/blueprint-spec
+#
+# Usage:
+#   1. Push this file to the repo root.
+#   2. In the Render dashboard → New → Blueprint → select this repo.
+#   3. Render reads render.yaml and creates the service automatically.
+#   4. Fill in the env-var values in the Render dashboard (they are marked `sync: false`).
+
+services:
+  - type: web
+    name: receipt-splitter-api
+    runtime: python
+    plan: free                        # Render free tier
+
+    # CRITICAL — tells Render to build from the backend subfolder
+    rootDir: agentic-receipt-splitter
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    envVars:
+      # Supabase Postgres connection string
+      - key: DATABASE_URL
+        sync: false                   # set manually in Render dashboard
+
+      # Google Gemini API key (for vision / LLM calls)
+      - key: GOOGLE_API_KEY
+        sync: false
+
+      # The Vercel frontend URL — needed for CORS
+      # e.g. https://receipt-splitter.vercel.app
+      - key: FRONTEND_ORIGIN
+        sync: false
+
+      # Optional: minimum confidence threshold for vision extraction
+      - key: VISION_CONF_THRESHOLD
+        value: "0.80"
+
+      # Python version
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+
+    # Health check — Render pings this to confirm the service is up
+    healthCheckPath: /
+
+    # Auto-deploy on push to the default branch
+    autoDeploy: true
