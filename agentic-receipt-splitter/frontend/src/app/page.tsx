@@ -37,12 +37,15 @@ function isReceiptTooPoor(state: ReceiptState): boolean {
   return totalFields > 0 && flagCount / totalFields >= 0.5;
 }
 
+const MAX_INTERVIEW_ATTEMPTS = 3;
+
 export default function Home() {
   const [step, setStep] = useState<AppStep>("upload");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState<ReceiptState | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState(0);
 
   /* ---- Step 1 → 2: upload image ---- */
   const handleUpload = useCallback(async (file: File) => {
@@ -71,6 +74,32 @@ export default function Home() {
     }
   }, []);
 
+  /**
+   * Handle a failed interview attempt: increment attempts and either show
+   * a clarification message or bail back to upload after MAX_INTERVIEW_ATTEMPTS.
+   */
+  const handleFailedAttempt = useCallback(
+    (message: string) => {
+      const nextAttempt = attempts + 1;
+      setAttempts(nextAttempt);
+
+      if (nextAttempt >= MAX_INTERVIEW_ATTEMPTS) {
+        setStep("upload");
+        setError(
+          "Not enough information was provided to split the bill accurately. Please try again."
+        );
+        setState(null);
+        setClarification(null);
+        setAttempts(0);
+      } else {
+        setClarification(
+          `${message}\n\n(Attempt ${nextAttempt} of ${MAX_INTERVIEW_ATTEMPTS})`
+        );
+      }
+    },
+    [attempts]
+  );
+
   /* ---- Step 2 → 3 (or back to 2 with clarification): submit assignment ---- */
   const handleInterview = useCallback(
     async (text: string) => {
@@ -82,25 +111,23 @@ export default function Home() {
         const s = res.state;
         setState(s);
 
-        // If the backend still has pending questions, it needs clarification
         if (s.pending_questions.length > 0) {
-          setClarification(s.pending_questions.join("\n\n"));
-          // stay on "review" step
+          handleFailedAttempt(s.pending_questions.join("\n\n"));
         } else if (s.final_costs && s.final_costs.length > 0) {
           setStep("results");
         } else {
-          setClarification(
+          handleFailedAttempt(
             "Something went wrong computing the split. Please try describing the assignments again."
           );
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Submission failed";
-        setClarification(`Error: ${msg}. Please try again.`);
+        handleFailedAttempt(`Error: ${msg}. Please try again.`);
       } finally {
         setLoading(false);
       }
     },
-    [state]
+    [state, handleFailedAttempt]
   );
 
   /* ---- Reset everything ---- */
@@ -110,6 +137,7 @@ export default function Home() {
     setError(null);
     setState(null);
     setClarification(null);
+    setAttempts(0);
   }, []);
 
   return (
