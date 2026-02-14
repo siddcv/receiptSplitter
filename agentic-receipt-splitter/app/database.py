@@ -81,13 +81,10 @@ def get_checkpointer() -> PostgresSaver:
         # It also ensures regular upserts are committed without explicit commits.
         # prepare_threshold=0 disables prepared statements (required for
         # Supabase transaction pooler / Supavisor).
-        def _configure_conn(conn):
-            conn.autocommit = True
-            conn.prepare_threshold = 0
 
         pool = ConnectionPool(
             dsn,
-            configure=_configure_conn,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
         )
         _CHECKPOINTER = PostgresSaver(pool)
         # Initialize schema if supported by the library version
