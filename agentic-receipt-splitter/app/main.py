@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -31,6 +32,18 @@ load_dotenv(override=False)
 
 # FastAPI app singleton
 app = FastAPI(title="Agentic Receipt Splitter", version="0.1")
+
+# CORS — allow the Next.js frontend (dev & production)
+app.add_middleware(
+	CORSMiddleware,
+	allow_origins=[
+		"http://localhost:3000",   # Next.js dev server
+		"http://127.0.0.1:3000",
+	],
+	allow_credentials=True,
+	allow_methods=["*"],
+	allow_headers=["*"],
+)
 
 # Compiled graph singleton
 _APP_GRAPH = None
@@ -311,6 +324,12 @@ async def submit_interview(thread_id: str, body: InterviewRequest) -> Dict[str, 
 				merged_state["audit_log"] = merged_state["audit_log"] + value
 			else:
 				merged_state[key] = value
+
+		# Normalize final_costs: math node returns {participant_costs: [...], ...}
+		# but ReceiptState.final_costs expects a plain list of dicts.
+		fc = merged_state.get("final_costs")
+		if isinstance(fc, dict) and "participant_costs" in fc:
+			merged_state["final_costs"] = fc["participant_costs"]
 
 	# Serialize any Pydantic models for JSON storage
 	merged_state = _serialize_state(merged_state)
