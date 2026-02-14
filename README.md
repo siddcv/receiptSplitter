@@ -1,2 +1,1 @@
 # receiptSplitter
-#test
