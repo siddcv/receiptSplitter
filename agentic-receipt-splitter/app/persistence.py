@@ -616,4 +616,65 @@ def save_final_costs(
 
     except (OperationalError, IntegrityError) as e:
         logger.error(f"❌ DB error saving final costs for {thread_id}: {e}")
-        raise PersistenceError(f"Failed to save final costs: {e}"
+        raise PersistenceError(f"Failed to save final costs: {e}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error saving final costs for {thread_id}: {e}")
+        raise PersistenceError(f"Unexpected error saving final costs: {e}")
+
+
+def save_math_data(state: Dict[str, Any]) -> None:
+    """
+    Orchestrator: persist all math-node data to business tables.
+
+    Called after the math node completes successfully.
+    Saves per-participant final costs and audit events.
+
+    Args:
+        state: Workflow state dict containing final_costs + audit_log
+
+    Raises:
+        PersistenceError: If any persistence operation fails
+    """
+    def _g(key, default=None):
+        if isinstance(state, dict):
+            return state.get(key, default)
+        return getattr(state, key, default)
+
+    thread_id = _g("thread_id")
+    if not thread_id:
+        logger.warning("No thread_id in state, cannot save math data")
+        return
+
+    final_costs = _g("final_costs")
+    if not final_costs:
+        logger.warning(f"No final_costs in state for {thread_id}, skipping")
+        return
+
+    # Extract participant_costs list from the final_costs dict
+    participant_costs = final_costs.get("participant_costs", []) if isinstance(final_costs, dict) else []
+    if not participant_costs:
+        logger.warning(f"No participant_costs in final_costs for {thread_id}, skipping")
+        return
+
+    logger.info(f"💾 Persisting math data for {thread_id}")
+
+    try:
+        # 1. Final costs → final_costs table
+        save_final_costs(thread_id, participant_costs)
+
+        # 2. Audit events (math-specific ones)
+        audit_log = _g("audit_log", [])
+        if audit_log:
+            save_audit_events(thread_id, audit_log)
+
+        logger.info(
+            f"✅ Successfully persisted all math data for {thread_id}"
+        )
+
+    except PersistenceError:
+        raise
+    except Exception as e:
+        logger.error(
+            f"❌ Unexpected error persisting math data for {thread_id}: {e}"
+        )
+        raise PersistenceError(f"Failed to persist math data: {e}")
