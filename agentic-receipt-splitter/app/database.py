@@ -17,7 +17,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from psycopg import connect
-from psycopg.errors import OperationalError
+from psycopg.errors import DuplicatePreparedStatement, OperationalError
 # Import path for the Postgres checkpointer in LangGraph
 from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg_pool import ConnectionPool
@@ -44,11 +44,16 @@ def ensure_db_ready(timeout_seconds: int = 10) -> None:
     """Attempt a simple connection and ping to verify DB is reachable."""
     dsn = get_database_url()
     try:
-        with connect(dsn, connect_timeout=timeout_seconds, prepare_threshold=0) as conn:
+        with connect(
+            dsn,
+            connect_timeout=timeout_seconds,
+            prepare_threshold=None,
+            autocommit=True,
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
                 cur.fetchone()
-    except OperationalError as e:
+    except (OperationalError, DuplicatePreparedStatement) as e:
         raise RuntimeError(f"Unable to connect to Postgres: {e}")
 
 
@@ -57,13 +62,15 @@ def get_connection(**kwargs):
 
     Supabase's transaction pooler (Supavisor) multiplexes connections, so
     prepared statements created on one backend aren't visible to others.
-    Setting prepare_threshold=0 tells psycopg to never use server-side
-    prepared statements.
+    Setting prepare_threshold=None tells psycopg to completely disable
+    server-side prepared statements (0 means "prepare on first use",
+    which still triggers PREPARE and causes DuplicatePreparedStatement
+    errors with transaction-mode poolers).
 
     All keyword arguments are forwarded to psycopg.connect().
     """
     dsn = get_database_url()
-    return connect(dsn, prepare_threshold=0, **kwargs)
+    return connect(dsn, prepare_threshold=None, **kwargs)
 
 
 def get_checkpointer() -> PostgresSaver:
@@ -79,12 +86,12 @@ def get_checkpointer() -> PostgresSaver:
         # Autocommit is required because the checkpointer migrations use
         # CREATE INDEX CONCURRENTLY, which cannot run inside a transaction.
         # It also ensures regular upserts are committed without explicit commits.
-        # prepare_threshold=0 disables prepared statements (required for
-        # Supabase transaction pooler / Supavisor).
+        # prepare_threshold=None fully disables prepared statements (required
+        # for Supabase transaction pooler / Supavisor on port 6543).
 
         pool = ConnectionPool(
             dsn,
-            kwargs={"autocommit": True, "prepare_threshold": 0},
+            kwargs={"autocommit": True, "prepare_threshold": None},
         )
         _CHECKPOINTER = PostgresSaver(pool)
         # Initialize schema if supported by the library version
