@@ -17,11 +17,10 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from psycopg import connect
 from psycopg.errors import IntegrityError, OperationalError
 from psycopg.types.json import Jsonb
 
-from app.database import get_database_url
+from app.database import get_connection
 from app.graph.state import AuditEvent, Item, ItemAssignment
 
 logger = logging.getLogger(__name__)
@@ -49,8 +48,6 @@ def save_receipt_data(thread_id: str, totals: Optional[Any], image_path: Optiona
         return
     
     try:
-        dsn = get_database_url()
-        
         # Support both Totals Pydantic model and plain dict
         def _get(obj, key, default=0):
             if hasattr(obj, key):
@@ -59,7 +56,7 @@ def save_receipt_data(thread_id: str, totals: Optional[Any], image_path: Optiona
                 return obj.get(key, default)
             return default
         
-        with connect(dsn) as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 # Extract totals with defaults
                 subtotal = Decimal(str(_get(totals, 'subtotal')))
@@ -117,10 +114,9 @@ def save_receipt_items(thread_id: str, items: List[Item]) -> List[str]:
         return []
     
     try:
-        dsn = get_database_url()
         item_ids = []
         
-        with connect(dsn) as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 # First, clear any existing items for this receipt (in case of re-processing)
                 cur.execute("DELETE FROM receipt_items WHERE receipt_id = %s", (thread_id,))
@@ -187,9 +183,7 @@ def save_audit_events(thread_id: str, events: List[AuditEvent]) -> None:
         return
         
     try:
-        dsn = get_database_url()
-        
-        with connect(dsn) as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 for event in events:
                     # Handle both dict and AuditEvent object formats
@@ -297,10 +291,9 @@ def save_participants(thread_id: str, participants: List[str]) -> Dict[str, str]
         return {}
 
     try:
-        dsn = get_database_url()
         name_to_id: Dict[str, str] = {}
 
-        with connect(dsn) as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 for name in participants:
                     cur.execute(
@@ -361,10 +354,9 @@ def save_assignments(
         return 0
 
     try:
-        dsn = get_database_url()
         rows_inserted = 0
 
-        with connect(dsn) as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 # Fetch receipt_items ordered by creation so positional index
                 # matches the item_index used by the interview node.
@@ -548,10 +540,9 @@ def save_final_costs(
         return 0
 
     try:
-        dsn = get_database_url()
         rows_inserted = 0
 
-        with connect(dsn) as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 # Build a name → UUID lookup from the participants table
                 cur.execute(
@@ -625,65 +616,4 @@ def save_final_costs(
 
     except (OperationalError, IntegrityError) as e:
         logger.error(f"❌ DB error saving final costs for {thread_id}: {e}")
-        raise PersistenceError(f"Failed to save final costs: {e}")
-    except Exception as e:
-        logger.error(f"❌ Unexpected error saving final costs for {thread_id}: {e}")
-        raise PersistenceError(f"Unexpected error saving final costs: {e}")
-
-
-def save_math_data(state: Dict[str, Any]) -> None:
-    """
-    Orchestrator: persist all math-node data to business tables.
-
-    Called after the math node completes successfully.
-    Saves per-participant final costs and audit events.
-
-    Args:
-        state: Workflow state dict containing final_costs + audit_log
-
-    Raises:
-        PersistenceError: If any persistence operation fails
-    """
-    def _g(key, default=None):
-        if isinstance(state, dict):
-            return state.get(key, default)
-        return getattr(state, key, default)
-
-    thread_id = _g("thread_id")
-    if not thread_id:
-        logger.warning("No thread_id in state, cannot save math data")
-        return
-
-    final_costs = _g("final_costs")
-    if not final_costs:
-        logger.warning(f"No final_costs in state for {thread_id}, skipping")
-        return
-
-    # Extract participant_costs list from the final_costs dict
-    participant_costs = final_costs.get("participant_costs", []) if isinstance(final_costs, dict) else []
-    if not participant_costs:
-        logger.warning(f"No participant_costs in final_costs for {thread_id}, skipping")
-        return
-
-    logger.info(f"💾 Persisting math data for {thread_id}")
-
-    try:
-        # 1. Final costs → final_costs table
-        save_final_costs(thread_id, participant_costs)
-
-        # 2. Audit events (math-specific ones)
-        audit_log = _g("audit_log", [])
-        if audit_log:
-            save_audit_events(thread_id, audit_log)
-
-        logger.info(
-            f"✅ Successfully persisted all math data for {thread_id}"
-        )
-
-    except PersistenceError:
-        raise
-    except Exception as e:
-        logger.error(
-            f"❌ Unexpected error persisting math data for {thread_id}: {e}"
-        )
-        raise PersistenceError(f"Failed to persist math data: {e}")
+        raise PersistenceError(f"Failed to save final costs: {e}"
