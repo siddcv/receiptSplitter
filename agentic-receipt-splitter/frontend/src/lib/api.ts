@@ -18,6 +18,11 @@ export async function uploadReceipt(file: File): Promise<UploadResponse> {
   });
 
   if (!res.ok) {
+    if (res.status === 429) {
+      throw new Error(
+        "You\u2019ve reached the upload limit (3 per hour). Please wait a while and try again."
+      );
+    }
     const body = await res.json().catch(() => null);
     throw new Error(
       body?.detail ?? `Upload failed (${res.status})`
@@ -39,6 +44,11 @@ export async function submitInterview(
   });
 
   if (!res.ok) {
+    if (res.status === 429) {
+      throw new Error(
+        "You\u2019ve sent too many requests. Please wait a moment and try again."
+      );
+    }
     const body = await res.json().catch(() => null);
     throw new Error(
       body?.detail ?? `Interview submission failed (${res.status})`

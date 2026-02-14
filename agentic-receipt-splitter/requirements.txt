@@ -17,3 +17,6 @@ psycopg[binary,pool]==3.3.2
 
 # LLM provider (used later in vision node)
 langchain-google-genai==4.2.0
+
+# Rate limiting
+slowapi==0.1.9
