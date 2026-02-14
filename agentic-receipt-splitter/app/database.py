@@ -37,6 +37,12 @@ def get_database_url() -> str:
 	url = os.getenv("DATABASE_URL")
 	if not url:
 		raise RuntimeError("DATABASE_URL is not set in environment/.env")
+	# Disable prepared statements for Supabase transaction pooler compatibility.
+    # Supavisor multiplexes connections, so prepared statements on one backend
+    # connection aren't visible to others, causing "already exists" errors.
+	if "prepare_threshold" not in url:
+		separator = "&" if "?" in url else "?"
+		url += f"{separator}prepare_threshold=0"
 	return url
 
 
