@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------ */
-/*  Step 3 — Per-person itemised results                              */
+/*  Step 3 - Per-person itemised results                              */
 /* ------------------------------------------------------------------ */
 "use client";
 
@@ -17,11 +17,13 @@ function $(v: string | number) {
 
 export default function ResultsStep({ costs, totals, onStartOver }: ResultsStepProps) {
   const grandTotal = costs.reduce((sum, c) => sum + Number.parseFloat(c.total_owed), 0);
+  const grandTotalCents = Math.round(grandTotal * 100);
+  const receiptTotalCents = totals ? Math.round(Number.parseFloat(totals.grand_total) * 100) : null;
 
   return (
     <section className="mx-auto w-full max-w-4xl space-y-8">
       <div className="text-center space-y-1">
-        <h2 className="text-2xl font-bold text-gray-900">🎉 Bill Split Results</h2>
+        <h2 className="text-2xl font-bold text-gray-900">Bill Split Results</h2>
         <p className="text-sm text-gray-500">Here&apos;s what each person owes.</p>
       </div>
 
@@ -51,15 +53,12 @@ export default function ResultsStep({ costs, totals, onStartOver }: ResultsStepP
                 <tbody className="divide-y divide-gray-50">
                   {person.item_costs.map((it) => {
                     const pct = it.share_percentage;
-                    const shareLabel =
-                      pct === 100 ? "full" : `${Math.round(pct)}%`;
+                    const shareLabel = pct === 100 ? "full" : `${Math.round(pct)}%`;
                     return (
                       <tr key={it.item_index}>
                         <td className="py-1.5 text-gray-700">{it.item_name}</td>
                         <td className="py-1.5 text-right text-gray-500">{shareLabel}</td>
-                        <td className="py-1.5 text-right font-medium text-gray-800">
-                          {$(it.cost)}
-                        </td>
+                        <td className="py-1.5 text-right font-medium text-gray-800">{$(it.cost)}</td>
                       </tr>
                     );
                   })}
@@ -112,14 +111,13 @@ export default function ResultsStep({ costs, totals, onStartOver }: ResultsStepP
         )}
         {totals && (
           <div className="mt-2 text-center">
-            {Math.abs(grandTotal - Number.parseFloat(totals.grand_total)) < 0.06 ? (
+            {receiptTotalCents !== null && grandTotalCents === receiptTotalCents ? (
               <span className="inline-flex items-center gap-1 text-green-600 font-medium">
-                ✅ Totals match
+                Totals match
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 text-red-600 font-medium">
-                ⚠️ Totals differ by{" "}
-                {$(Math.abs(grandTotal - Number.parseFloat(totals.grand_total)))}
+                Totals differ by {$(Math.abs(grandTotalCents - (receiptTotalCents ?? 0)) / 100)}
               </span>
             )}
           </div>
@@ -132,7 +130,7 @@ export default function ResultsStep({ costs, totals, onStartOver }: ResultsStepP
           onClick={onStartOver}
           className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-200"
         >
-          ↩ Start Over
+          Start Over
         </button>
       </div>
     </section>
