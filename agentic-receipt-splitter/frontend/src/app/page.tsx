@@ -4,13 +4,13 @@
 /* ------------------------------------------------------------------ */
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import UploadStep from "@/components/UploadStep";
 import ReviewStep from "@/components/ReviewStep";
 import ResultsStep from "@/components/ResultsStep";
 import Spinner from "@/components/Spinner";
-import { uploadReceipt, submitInterview } from "@/lib/api";
+import { uploadReceipt, submitInterview, waitForBackendReady } from "@/lib/api";
 import type { AppStep, ReceiptState } from "@/lib/types";
 
 /**
@@ -46,6 +46,34 @@ export default function Home() {
   const [state, setState] = useState<ReceiptState | null>(null);
   const [clarification, setClarification] = useState<string | null>(null);
   const [attempts, setAttempts] = useState(0);
+  const [backendReady, setBackendReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const warmBackend = async () => {
+      try {
+        await waitForBackendReady();
+        if (!cancelled) {
+          setBackendReady(true);
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : "Backend wake-up check failed. Please refresh and try again.";
+          setError(msg);
+          setBackendReady(true);
+        }
+      }
+    };
+
+    warmBackend();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /* ---- Step 1 → 2: upload image ---- */
   const handleUpload = useCallback(async (file: File) => {
@@ -162,9 +190,15 @@ export default function Home() {
 
       {/* ---- Main content ---- */}
       <main className="mx-auto max-w-5xl px-6 py-10">
-        {loading && step === "upload" && <Spinner message="Extracting receipt data…" />}
+        {!backendReady && step === "upload" && (
+          <Spinner message="Waking backend server... this can take up to a minute on the free plan." />
+        )}
 
-        {step === "upload" && !loading && (
+        {backendReady && loading && step === "upload" && (
+          <Spinner message="Extracting receipt data…" />
+        )}
+
+        {step === "upload" && backendReady && !loading && (
           <UploadStep loading={loading} onUpload={handleUpload} error={error} />
         )}
 
