@@ -82,4 +82,4 @@ export interface InterviewResponse {
 }
 
 /** Which step of the UI flow the user is on */
-export type AppStep = "upload" | "review" | "results";
+export type AppStep = "upload" | "review" | "tip" | "results";
