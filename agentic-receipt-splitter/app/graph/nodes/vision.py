@@ -8,7 +8,6 @@ The node reads the image from state.image_path, calls the model, parses the
 JSON response into Item/Totals models, and flags low-confidence fields as
 pending_questions for human review.
 """
-
 from __future__ import annotations
 
 import base64
