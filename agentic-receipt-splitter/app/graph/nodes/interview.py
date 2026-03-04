@@ -356,8 +356,9 @@ def _parse_simple_assignment(items: List, participants: List[str], assignment_in
             # Create assignments for each item
             for item_idx in item_numbers:
                 if person_names:
-                    # Calculate equal shares for all people
-                    share_fraction = (Decimal("1.0") / len(person_names)).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+                    # Use high-precision equal shares so math-node cent allocation
+                    # can distribute rounding fairly across participants/items.
+                    share_fraction = Decimal("1") / Decimal(len(person_names))
                     shares = [
                         AssignmentShare(participant=person, fraction=share_fraction)
                         for person in person_names
@@ -405,7 +406,7 @@ def _parse_simple_assignment(items: List, participants: List[str], assignment_in
                 # Create shared assignments
                 for item_idx in item_numbers:
                     if person_names:
-                        share_fraction = (Decimal("1.0") / len(person_names)).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+                        share_fraction = Decimal("1") / Decimal(len(person_names))
                         shares = [
                             AssignmentShare(participant=person, fraction=share_fraction)
                             for person in person_names
@@ -653,7 +654,7 @@ def _validate_and_accept(items: List, participants: List[str], assignments: List
                 continue
             
             total_percentage += percentage
-            fraction = Decimal(str(percentage / 100.0)).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+            fraction = Decimal(str(percentage)) / Decimal("100")
             
             assignment_shares.append(AssignmentShare(
                 participant=participant,

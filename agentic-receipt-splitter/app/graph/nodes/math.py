@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Any, Dict, List
 
 from app.graph.state import AuditEvent, ReceiptState
@@ -47,12 +47,75 @@ class ParticipantCost(dict):
         self['total_owed'] = Decimal("0.00")
 
 
-def _calculate_item_costs(items: List, assignments: List, participants: List[str]) -> List[ParticipantCost]:
+def _to_cents(amount: Decimal) -> int:
+    """Convert a Decimal currency amount to integer cents."""
+    normalized = amount.quantize(TWO_DP, rounding=ROUND_HALF_UP)
+    return int((normalized * 100).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _from_cents(cents: int) -> Decimal:
+    """Convert integer cents back to Decimal currency."""
+    return (Decimal(cents) / Decimal(100)).quantize(TWO_DP, rounding=ROUND_HALF_UP)
+
+
+def _allocate_cents_exact(
+    total_cents: int,
+    raw_shares_cents: List[Decimal],
+    tie_offset: int = 0,
+    fairness_scores: List[int] | None = None,
+) -> tuple[List[int], List[int]]:
+    """Allocate *total_cents* across shares using largest-remainder method.
+
+    Tie-breaks are deterministic by the original list order, creating stable
+    participant ordering behavior across runs.
+    """
+    if not raw_shares_cents:
+        return [], []
+
+    floors = [int(v.to_integral_value(rounding=ROUND_FLOOR)) for v in raw_shares_cents]
+    remainders = [v - Decimal(f) for v, f in zip(raw_shares_cents, floors)]
+    allocated = floors[:]
+
+    leftover = total_cents - sum(allocated)
+
+    n = len(allocated)
+    offset = tie_offset % n if n else 0
+
+    bonus_winners: List[int] = []
+
+    if leftover > 0:
+        if fairness_scores is None:
+            fairness_scores = [0] * n
+        order = sorted(
+            range(len(allocated)),
+            key=lambda i: (-remainders[i], fairness_scores[i], (i - offset) % n),
+        )
+        bonus_winners = order[:leftover]
+        for i in bonus_winners:
+            allocated[i] += 1
+    elif leftover < 0:
+        # Defensive path for edge cases with inconsistent input shares.
+        order = sorted(
+            range(len(allocated)),
+            key=lambda i: (remainders[i], -((i - offset) % n)),
+        )
+        for i in order[: abs(leftover)]:
+            allocated[i] -= 1
+
+    return allocated, bonus_winners
+
+
+def _calculate_item_costs(
+    items: List,
+    assignments: List,
+    participants: List[str],
+) -> tuple[List[ParticipantCost], Dict[str, int]]:
     """Calculate individual item costs for each participant."""
     
     # Initialize participant cost tracking
     participant_costs = [ParticipantCost(p) for p in participants]
     participant_lookup = {p: i for i, p in enumerate(participants)}
+    bonus_penny_counts = {p: 0 for p in participants}
     
     # Calculate item costs for each assignment
     for assignment in assignments:
@@ -72,115 +135,121 @@ def _calculate_item_costs(items: List, assignments: List, participants: List[str
                 item_price = Decimal(str(item.get('price', item.get('unit_price', 0))))
                 item_quantity = Decimal(str(item.get('quantity', 1)))
             
-            # Calculate total cost for this item
+            # Calculate total cost for this item in cents for exact allocation.
             total_item_cost = (item_price * item_quantity).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-            
-            # Distribute cost among participants based on shares
+            total_item_cents = _to_cents(total_item_cost)
+
+            valid_shares: List[tuple[str, Decimal]] = []
             for share in shares:
                 if isinstance(share, dict):
                     participant = share.get('participant')
                     fraction = Decimal(str(share.get('fraction', 0)))
                 else:
                     participant = share.participant
-                    fraction = share.fraction
-                
+                    fraction = Decimal(str(share.fraction))
+
                 if participant in participant_lookup:
-                    participant_idx = participant_lookup[participant]
-                    participant_cost = (total_item_cost * fraction).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-                    
-                    # Record individual item cost
-                    participant_costs[participant_idx]['item_costs'].append({
-                        'item_index': item_idx,
-                        'item_name': item_name,
-                        'item_price': float(item_price),
-                        'quantity': float(item_quantity),
-                        'share_percentage': float(fraction * 100),
-                        'cost': float(participant_cost)
-                    })
-                    
-                    # Add to subtotal
-                    participant_costs[participant_idx]['subtotal'] += participant_cost
+                    valid_shares.append((participant, fraction))
+
+            if not valid_shares:
+                continue
+
+            # Stable participant ordering for deterministic, fair tie-breaking.
+            valid_shares.sort(key=lambda s: participant_lookup[s[0]])
+
+            raw_share_cents = [Decimal(total_item_cents) * frac for _, frac in valid_shares]
+            fairness_scores = [bonus_penny_counts[p] for p, _ in valid_shares]
+            allocated_share_cents, bonus_winners = _allocate_cents_exact(
+                total_item_cents,
+                raw_share_cents,
+                tie_offset=item_idx,
+                fairness_scores=fairness_scores,
+            )
+
+            for winner_idx in bonus_winners:
+                winner_participant = valid_shares[winner_idx][0]
+                bonus_penny_counts[winner_participant] += 1
+
+            for (participant, fraction), participant_cents in zip(valid_shares, allocated_share_cents):
+                participant_idx = participant_lookup[participant]
+                participant_cost = _from_cents(participant_cents)
+
+                # Record individual item cost
+                participant_costs[participant_idx]['item_costs'].append({
+                    'item_index': item_idx,
+                    'item_name': item_name,
+                    'item_price': float(item_price),
+                    'quantity': float(item_quantity),
+                    'share_percentage': float(fraction * 100),
+                    'cost': float(participant_cost)
+                })
+
+                # Add to subtotal
+                participant_costs[participant_idx]['subtotal'] += participant_cost
     
-    return participant_costs
+    return participant_costs, bonus_penny_counts
 
 
-def _distribute_taxes_tips_fees(participant_costs: List[ParticipantCost], totals: Dict) -> List[ParticipantCost]:
+def _distribute_taxes_tips_fees(
+    participant_costs: List[ParticipantCost],
+    totals: Dict,
+    bonus_penny_counts: Dict[str, int],
+) -> List[ParticipantCost]:
     """Distribute taxes, tips, and fees proportionally based on subtotal shares."""
     
     if not totals:
         logger.warning("No totals found - cannot distribute taxes/tips/fees")
         return participant_costs
     
-    # Get totals
-    tax_total = Decimal(str(_get(totals, 'tax_total', 0)))
-    tip_total = Decimal(str(_get(totals, 'tip_total', 0)))
-    fees_total = Decimal(str(_get(totals, 'fees_total', 0)))
-    
-    # Calculate total subtotal across all participants
-    total_subtotal = sum(pc['subtotal'] for pc in participant_costs)
-    
-    if total_subtotal <= 0:
+    # Get totals as exact cents.
+    tax_total_cents = _to_cents(Decimal(str(_get(totals, 'tax_total', 0))))
+    tip_total_cents = _to_cents(Decimal(str(_get(totals, 'tip_total', 0))))
+    fees_total_cents = _to_cents(Decimal(str(_get(totals, 'fees_total', 0))))
+
+    # Calculate subtotal shares in cents.
+    subtotal_cents = [_to_cents(pc['subtotal']) for pc in participant_costs]
+    total_subtotal_cents = sum(subtotal_cents)
+
+    if total_subtotal_cents <= 0:
         logger.warning("Total subtotal is zero - cannot distribute taxes/tips/fees proportionally")
         return participant_costs
-    
-    # First pass: calculate proportional shares
-    for participant_cost in participant_costs:
-        participant_subtotal = participant_cost['subtotal']
-        proportion = participant_subtotal / total_subtotal
-        
-        # Calculate shares (rounded down initially)
-        tax_share = (tax_total * proportion).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-        tip_share = (tip_total * proportion).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-        fees_share = (fees_total * proportion).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-        
-        participant_cost['tax_share'] = tax_share
-        participant_cost['tip_share'] = tip_share
-        participant_cost['fees_share'] = fees_share
-        participant_cost['proportion'] = float(proportion)  # Store for rounding adjustment
-    
-    # Ensure exact totals by adjusting for rounding errors
-    _adjust_for_rounding_errors(participant_costs, tax_total, tip_total, fees_total)
-    
-    # Calculate final totals
-    for participant_cost in participant_costs:
-        participant_cost['total_owed'] = (
-            participant_cost['subtotal'] + 
-            participant_cost['tax_share'] + 
-            participant_cost['tip_share'] + 
-            participant_cost['fees_share']
-        ).quantize(TWO_DP, rounding=ROUND_HALF_UP)
-        
-        # Remove temporary proportion field
-        participant_cost.pop('proportion', None)
+
+    participant_names = [pc['participant'] for pc in participant_costs]
+
+    def _allocate_pool(pool_cents: int, tie_offset: int) -> List[int]:
+        raw = [
+            (Decimal(pool_cents) * Decimal(sc)) / Decimal(total_subtotal_cents)
+            for sc in subtotal_cents
+        ]
+        fairness_scores = [bonus_penny_counts[name] for name in participant_names]
+        allocated, bonus_winners = _allocate_cents_exact(
+            pool_cents,
+            raw,
+            tie_offset=tie_offset,
+            fairness_scores=fairness_scores,
+        )
+        for winner_idx in bonus_winners:
+            bonus_penny_counts[participant_names[winner_idx]] += 1
+        return allocated
+
+    tax_alloc = _allocate_pool(tax_total_cents, tie_offset=0)
+    tip_alloc = _allocate_pool(tip_total_cents, tie_offset=1)
+    fees_alloc = _allocate_pool(fees_total_cents, tie_offset=2)
+
+    # Calculate final totals in cents then convert back to decimals.
+    for i, participant_cost in enumerate(participant_costs):
+        participant_cost['tax_share'] = _from_cents(tax_alloc[i])
+        participant_cost['tip_share'] = _from_cents(tip_alloc[i])
+        participant_cost['fees_share'] = _from_cents(fees_alloc[i])
+
+        total_owed_cents = subtotal_cents[i] + tax_alloc[i] + tip_alloc[i] + fees_alloc[i]
+        participant_cost['total_owed'] = _from_cents(total_owed_cents)
     
     return participant_costs
 
 
-def _adjust_for_rounding_errors(participant_costs: List[ParticipantCost], tax_total: Decimal, tip_total: Decimal, fees_total: Decimal):
-    """Adjust for rounding errors to ensure totals match exactly."""
-    
-    # Calculate current totals after rounding
-    current_tax = sum(pc['tax_share'] for pc in participant_costs)
-    current_tip = sum(pc['tip_share'] for pc in participant_costs)
-    current_fees = sum(pc['fees_share'] for pc in participant_costs)
-    
-    # Calculate differences (should be small rounding errors)
-    tax_diff = tax_total - current_tax
-    tip_diff = tip_total - current_tip  
-    fees_diff = fees_total - current_fees
-    
-    # Find participant with largest subtotal to absorb rounding differences
-    largest_participant_idx = max(range(len(participant_costs)), 
-                                key=lambda i: participant_costs[i]['subtotal'])
-    
-    # Adjust the largest participant's shares to make totals exact
-    participant_costs[largest_participant_idx]['tax_share'] += tax_diff
-    participant_costs[largest_participant_idx]['tip_share'] += tip_diff
-    participant_costs[largest_participant_idx]['fees_share'] += fees_diff
-
-
 def _validate_total_matches_receipt(participant_costs: List[ParticipantCost], totals: Dict) -> Dict:
-    """Validate that calculated total matches receipt total within tolerance."""
+    """Validate that calculated total matches receipt total exactly to the cent."""
     
     if not totals:
         return {'valid': False, 'message': 'No receipt totals found for validation'}
@@ -191,14 +260,12 @@ def _validate_total_matches_receipt(participant_costs: List[ParticipantCost], to
     # Get receipt total
     receipt_total = Decimal(str(_get(totals, 'grand_total', 0)))
     
-    # Check if they match (allowing for minimal rounding differences)
     difference = abs(calculated_total - receipt_total)
-    tolerance = Decimal('0.05')  # 5 cent tolerance
-    
-    if difference <= tolerance:
+
+    if difference == Decimal("0.00"):
         return {
             'valid': True, 
-            'message': 'Totals match within tolerance',
+            'message': 'Totals match exactly',
             'calculated_total': str(calculated_total),
             'receipt_total': str(receipt_total),
             'difference': str(difference)
@@ -322,11 +389,11 @@ def math_node(state: Dict[str, Any]) -> Dict[str, Any]:
     
     try:
         # Calculate individual item costs
-        participant_costs = _calculate_item_costs(items, assignments, participants)
+        participant_costs, bonus_penny_counts = _calculate_item_costs(items, assignments, participants)
         
         # Distribute taxes, tips, and fees proportionally
         if totals:
-            participant_costs = _distribute_taxes_tips_fees(participant_costs, totals)
+            participant_costs = _distribute_taxes_tips_fees(participant_costs, totals, bonus_penny_counts)
         
         # Validate total matches receipt
         validation_result = _validate_total_matches_receipt(participant_costs, totals) if totals else {'valid': True, 'message': 'No totals to validate'}
@@ -381,7 +448,7 @@ def math_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     timestamp=datetime.now(timezone.utc),
                     details={
                         "participant_count": len(participants),
-                        "validation_status": "passed" if validation_result['valid'] else "failed_but_within_tolerance",
+                        "validation_status": "passed" if validation_result['valid'] else "failed",
                         "calculated_total": validation_result.get('calculated_total', '0.00'),
                         "receipt_total": validation_result.get('receipt_total', '0.00'),
                         "difference": validation_result.get('difference', '0.00')
