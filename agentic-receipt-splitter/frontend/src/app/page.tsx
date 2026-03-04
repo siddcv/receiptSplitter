@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import UploadStep from "@/components/UploadStep";
 import ReviewStep from "@/components/ReviewStep";
+import TipStep from "@/components/TipStep";
 import ResultsStep from "@/components/ResultsStep";
 import Spinner from "@/components/Spinner";
 import { uploadReceipt, submitInterview, waitForBackendReady } from "@/lib/api";
@@ -142,7 +143,7 @@ export default function Home() {
         if (s.pending_questions.length > 0) {
           handleFailedAttempt(s.pending_questions.join("\n\n"));
         } else if (s.final_costs && s.final_costs.length > 0) {
-          setStep("results");
+          setStep("tip");
         } else {
           handleFailedAttempt(
             "Something went wrong computing the split. Please try describing the assignments again."
@@ -156,6 +157,71 @@ export default function Home() {
       }
     },
     [state, handleFailedAttempt]
+  );
+
+  /* ---- Tip step → Results: apply extra tip and move on ---- */
+  const handleTip = useCallback(
+    (tipPercent: number) => {
+      if (!state?.final_costs) return;
+
+      // Nothing to adjust
+      if (tipPercent <= 0) {
+        setStep("results");
+        return;
+      }
+
+      const subtotal = state.totals
+        ? Number.parseFloat(state.totals.subtotal)
+        : 0;
+      const extraTip = Math.round(subtotal * tipPercent) / 100; // dollar amount
+
+      // Distribute extra tip proportionally by each participant's subtotal share
+      const totalSubtotal = state.final_costs.reduce(
+        (sum, c) => sum + Number.parseFloat(c.subtotal),
+        0
+      );
+
+      let distributedTip = 0;
+      const updatedCosts = state.final_costs.map((c, idx) => {
+        const pSubtotal = Number.parseFloat(c.subtotal);
+        const proportion = totalSubtotal > 0 ? pSubtotal / totalSubtotal : 0;
+        let share =
+          Math.round(extraTip * proportion * 100) / 100; // round to cents
+
+        // Give rounding remainder to last participant
+        if (idx === state.final_costs!.length - 1) {
+          share = Math.round((extraTip - distributedTip) * 100) / 100;
+        }
+        distributedTip += share;
+
+        return {
+          ...c,
+          tip_share: (Number.parseFloat(c.tip_share) + share).toFixed(2),
+          total_owed: (Number.parseFloat(c.total_owed) + share).toFixed(2),
+        };
+      });
+
+      // Update totals
+      const updatedTotals = state.totals
+        ? {
+            ...state.totals,
+            tip_total: (
+              Number.parseFloat(state.totals.tip_total) + extraTip
+            ).toFixed(2),
+            grand_total: (
+              Number.parseFloat(state.totals.grand_total) + extraTip
+            ).toFixed(2),
+          }
+        : state.totals;
+
+      setState({
+        ...state,
+        final_costs: updatedCosts,
+        totals: updatedTotals,
+      });
+      setStep("results");
+    },
+    [state]
   );
 
   /* ---- Reset everything ---- */
@@ -182,6 +248,8 @@ export default function Home() {
             <span className={step === "upload" ? "text-indigo-600" : ""}>Upload</span>
             <span>→</span>
             <span className={step === "review" ? "text-indigo-600" : ""}>Assign</span>
+            <span>→</span>
+            <span className={step === "tip" ? "text-indigo-600" : ""}>Tip</span>
             <span>→</span>
             <span className={step === "results" ? "text-indigo-600" : ""}>Results</span>
           </div>
@@ -211,6 +279,10 @@ export default function Home() {
             onSubmit={handleInterview}
             onCancel={handleStartOver}
           />
+        )}
+
+        {step === "tip" && state && (
+          <TipStep totals={state.totals} onSubmit={handleTip} />
         )}
 
         {step === "results" && state?.final_costs && (
